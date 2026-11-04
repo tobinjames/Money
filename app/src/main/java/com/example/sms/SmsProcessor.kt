@@ -6,6 +6,7 @@ import com.example.ai.GeminiSmsParser
 import com.example.ai.ParsedTransactionResponse
 import com.example.data.*
 import kotlinx.coroutines.flow.first
+import com.example.domain.LedgerRules
 import java.util.UUID
 
 object SmsProcessor {
@@ -75,45 +76,49 @@ object SmsProcessor {
     /**
      * Core processing logic: parsing, category matches, accounts mapping, EMI split & updates database
      */
-    suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long) {
+    suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long): Boolean {
         Log.d(TAG, "Processing SMS from $sender received at $timestamp (${body.length} chars)")
         
         // Nothing can be read or saved before sign-in (Firestore rules). Leave the message in the
         // inbox, without moving the "last processed" marker, so reconciliation picks it up later.
         if (!FirebaseService.hasSignedInUser()) {
             Log.w(TAG, "No signed-in user; deferring SMS processing.")
-            return
+            return false
         }
 
         // Make sure accounts and transactions come from Firestore (server or offline cache), not the
         // still-empty in-memory lists of a freshly started background process.
         FirebaseService.ensureCoreDataLoaded()
 
-        // Query current senders and accounts
+        // Pre-filter first: most SMS are not from a bank, and this needs only two small lists.
         val whitelisted = FirebaseService.getWhitelistedSenders().first()
+        val privacyKeywords = FirebaseService.getPrivacyKeywords().first()
+        if (!preFilterSms(sender, body, whitelisted, privacyKeywords)) {
+            return true
+        }
+
         val accounts = FirebaseService.getAccounts().first()
         val historicalTransactions = FirebaseService.getTransactions().first()
         val merchantRules = FirebaseService.getMerchantRules().first()
         val categories = FirebaseService.getCategories().first()
-        val privacyKeywords = FirebaseService.getPrivacyKeywords().first()
-        
+
         // 1. Entire SMS Exact Duplicate Check (Ignore the second one)
         val isExactDuplicate = historicalTransactions.any {
             it.originalSmsText?.trim() == body.trim()
         }
         if (isExactDuplicate) {
             Log.d(TAG, "Duplicate Check: Exact duplicate SMS body already processed. Ignoring.")
-            return
-        }
-
-        // Pre-filter
-        if (!preFilterSms(sender, body, whitelisted, privacyKeywords)) {
-            return
+            return true
         }
 
         // Parse through Gemini (with local regex fallback)
-        val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return
+        val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return true
         Log.d(TAG, "Parsed transaction: type=${parsed.transactionType}, category=${parsed.suggestedCategory}")
+        if (parsed.amount <= 0.0) {
+            Log.w(TAG, "No positive amount found in SMS; not creating a transaction.")
+            updateLastProcessedTimestamp(context, timestamp)
+            return true
+        }
 
         // 2. Map transaction to an Account using lastFourDigits match first, then dynamic Gemini matching
         var targetAccount: Account? = null
@@ -178,7 +183,7 @@ object SmsProcessor {
         if (timestamp < targetAccount.asOfDate) {
             Log.d(TAG, "Timeline Skip: SMS Timestamp ($timestamp) < Account '${targetAccount.name}' As Of Date (${targetAccount.asOfDate}). Skipped.")
             updateLastProcessedTimestamp(context, timestamp)
-            return
+            return true
         }
 
         // 3ba. Historical Accounting Guardrail Check
@@ -187,27 +192,31 @@ object SmsProcessor {
             targetAccount.lastReconciledDate?.let { lastRec ->
                 if (timestamp < lastRec) {
                     Log.d(TAG, "Accounting Guardrail Skip: SMS Timestamp ($timestamp) is within closed period < lastReconciledDate ($lastRec) on Account '${targetAccount.name}'. Skipped.")
-                    return
+                    return true
                 }
             }
         }
 
         // 3ba_transfer. Double SMS Opposite Transfer Deduplication and Merging Logic
         val isCredit = parsed.transactionType == "CREDIT"
-        val oppositeTransferTx = historicalTransactions.find { tx ->
-            Math.abs(tx.amount - parsed.amount) < 0.01 &&
-            isSameDay(tx.timestamp, timestamp) &&
-            tx.accountId != targetAccount.id &&
-            !(tx.type == TransactionType.TRANSFER && tx.accountId != null && tx.targetAccountId != null) &&
-            if (isCredit) {
-                tx.type == TransactionType.EXPENSE
-            } else {
-                tx.type == TransactionType.INCOME
-            }
-        }
+        val ownAccountIds = accounts
+            .filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
+            .map { it.id }
+            .toSet()
+        val oppositeTransferTx = LedgerRules.findTransferCounterpart(
+            history = historicalTransactions.filter {
+                !(it.type == TransactionType.TRANSFER && it.accountId.isNotEmpty() && it.targetAccountId != null)
+            },
+            amount = parsed.amount,
+            timestamp = timestamp,
+            isCredit = isCredit,
+            accountId = targetAccount.id,
+            ownAccountIds = ownAccountIds,
+            smsBody = body
+        )
 
         if (oppositeTransferTx != null) {
-            Log.d(TAG, "Transfer Deduplication: Found opposite transaction of same amount on same day. Merging both SMS into a single TRANSFER transaction.")
+            Log.d(TAG, "Transfer Deduplication: Found the opposite SMS for the same amount within the transfer window. Merging both SMS into a single TRANSFER transaction.")
             try {
                 val oppositeAcc = accounts.find { it.id == oppositeTransferTx.accountId }
                 val oppositeAccName = oppositeAcc?.name ?: "Other Account"
@@ -220,6 +229,7 @@ object SmsProcessor {
                         category = "Transfer",
                         targetAccountId = targetAccount.id,
                         narration = "Transfer: $oppositeAccName → ${targetAccount.name}",
+                        payeeName = "Transfer: $oppositeAccName → ${targetAccount.name}",
                         originalSmsText = "${oppositeTransferTx.originalSmsText ?: ""}\n[Credit SMS]: $body".trim(),
                         status = TransactionStatus.CONFIRMED,
                         isProbablyDuplicate = false
@@ -233,6 +243,7 @@ object SmsProcessor {
                         accountId = targetAccount.id,
                         targetAccountId = oppositeTransferTx.accountId,
                         narration = "Transfer: ${targetAccount.name} → $oppositeAccName",
+                        payeeName = "Transfer: ${targetAccount.name} → $oppositeAccName",
                         originalSmsText = "[Credit SMS]: ${oppositeTransferTx.originalSmsText ?: ""}\n[Debit SMS]: $body".trim(),
                         status = TransactionStatus.CONFIRMED,
                         isProbablyDuplicate = false
@@ -242,7 +253,7 @@ object SmsProcessor {
                 FirebaseService.updateTransaction(mergedTx)
                 Log.d(TAG, "Transfer Deduplication: Successfully merged debit & credit SMS into a single Transfer: ${mergedTx.id}")
                 updateLastProcessedTimestamp(context, timestamp)
-                return
+                return true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to merge opposite transfer transactions, falling back to standard processing: ${e.message}", e)
             }
@@ -324,9 +335,20 @@ object SmsProcessor {
         val isLoanAccount = targetAccount.type == AccountType.LOAN
         val containsEmiKeywords = body.lowercase().contains("emi") || body.lowercase().contains("loan installment") || body.lowercase().contains("installment")
         
-        if (isLoanAccount || (containsEmiKeywords && accounts.any { it.type == AccountType.LOAN })) {
+        // An EMI debited from a bank account must name the loan (its digits or name), or say "loan"
+        // when there is only one loan. Card "converted to EMI" messages are not loan payments.
+        val lowerBody = body.lowercase()
+        val loanAccounts = accounts.filter { it.type == AccountType.LOAN }
+        val emiLoan = if (containsEmiKeywords && targetAccount.accountType == "ASSET" && !lowerBody.contains("converted")) {
+            loanAccounts.firstOrNull { loan ->
+                val tokens = loan.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
+                tokens.any { body.contains(it) } || (loan.name.length >= 3 && lowerBody.contains(loan.name.lowercase()))
+            } ?: loanAccounts.singleOrNull()?.takeIf { lowerBody.contains("loan") }
+        } else null
+
+        if (isLoanAccount || emiLoan != null) {
             // Find the loan account we are paying
-            val loanAcc = if (isLoanAccount) targetAccount else accounts.firstOrNull { it.type == AccountType.LOAN }
+            val loanAcc = if (isLoanAccount) targetAccount else emiLoan
             
             if (loanAcc != null) {
                 // "Automated Interest Split: When an SMS matching an EMI payment is processed, the app must auto-calculate the split using the formula:
@@ -343,12 +365,17 @@ object SmsProcessor {
                 
                 // Perform EMI splits Database Actions:
                 // Action 1: Reduce the outstanding Loan Account balance by the Principal Component.
-                val updatedLoanBalance = loanAcc.balance + principalComponent // outstanding was negative, so balance becomes closer to 0
-                FirebaseService.updateAccount(loanAcc.copy(balance = updatedLoanBalance))
-                
-                // Find source of transfer (Savings/etc)
-                val sourceSavingsAcc = accounts.find { it.type == AccountType.SAVINGS_ACCOUNT }
-                val sourceId = sourceSavingsAcc?.id ?: "unknown_src"
+                // (The loan balance is computed from the ledger; the principal transfer reduces it.)
+
+                // The paying account: the one the SMS was matched to, unless that is the loan itself.
+                val sourceAcc = if (targetAccount.id != loanAcc.id && targetAccount.accountType == "ASSET") {
+                    targetAccount
+                } else {
+                    accounts.find { it.type == AccountType.SAVINGS_ACCOUNT }
+                        ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
+                }
+                val sourceId = sourceAcc.id
+                val payer = sourceAcc.ownerUserId.ifEmpty { "User 1" }
                 
                 // Action 2: Log the Principal Component as a "Transfer" from Savings to the Loan Account (hidden from Expense charts)
                 val transferTx = Transaction(
@@ -359,7 +386,7 @@ object SmsProcessor {
                     timestamp = timestamp,
                     accountId = sourceId,
                     targetAccountId = loanAcc.id,
-                    paidByUserId = "User 1", // Assume husband by default, can be modified
+                    paidByUserId = payer,
                     scope = TransactionScope.FAMILY,
                     narration = "EMI Principal Auto-Transfer to ${loanAcc.name}",
                     status = TransactionStatus.CONFIRMED,
@@ -379,7 +406,7 @@ object SmsProcessor {
                     category = "Finance: Loan Interest",
                     timestamp = timestamp,
                     accountId = sourceId,
-                    paidByUserId = "User 1",
+                    paidByUserId = payer,
                     scope = TransactionScope.FAMILY,
                     narration = "EMI Interest Expense for ${loanAcc.name}",
                     status = TransactionStatus.CONFIRMED,
@@ -402,6 +429,7 @@ object SmsProcessor {
 
         // Save last processed SMS timestamp locally
         updateLastProcessedTimestamp(context, timestamp)
+        return true
     }
 
     private suspend fun logStandardTransaction(

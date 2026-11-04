@@ -35,6 +35,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.ExistingWorkPolicy
 import com.example.sms.SmsBackfillWorker
+import com.example.domain.LedgerRules
 
 // Thrown when an email/password user must open the verification link before signing in.
 class EmailVerificationRequiredException(message: String) : Exception(message)
@@ -178,15 +179,11 @@ object FirebaseService {
         coreDataMutex.withLock {
             try {
                 if (!accountsLoaded) {
-                    val remote = fs.collection("ChartOfAccounts").get().awaitTask().documents.mapNotNull { doc ->
+                    val snapshot = fs.collection("ChartOfAccounts").get().awaitTask()
+                    val remote = snapshot.documents.mapNotNull { doc ->
                         try { doc.toObject(Account::class.java) } catch (e: Exception) { null }
                     }
-                    val merged = localAccounts.value.toMutableList()
-                    remote.forEach { acc ->
-                        val idx = merged.indexOfFirst { it.accountId == acc.accountId }
-                        if (idx != -1) merged[idx] = acc else merged.add(acc)
-                    }
-                    localAccounts.value = merged
+                    localAccounts.value = mergeRemoteAccounts(snapshot.documents.map { it.id }.toSet(), remote)
                     accountsLoaded = true
                 }
                 if (!transactionsLoaded) {
@@ -1157,6 +1154,20 @@ object FirebaseService {
             }
     }
 
+    // Account ids last seen in Firestore, so a document deleted on the other phone is dropped here too.
+    private var knownRemoteAccountIds: Set<String> = emptySet()
+
+    private fun mergeRemoteAccounts(remoteIds: Set<String>, remote: List<Account>): List<Account> {
+        val removed = knownRemoteAccountIds - remoteIds
+        knownRemoteAccountIds = remoteIds
+        val merged = localAccounts.value.filter { it.accountId !in removed }.toMutableList()
+        remote.forEach { acc ->
+            val idx = merged.indexOfFirst { it.accountId == acc.accountId }
+            if (idx != -1) merged[idx] = acc else merged.add(acc)
+        }
+        return merged
+    }
+
     // --- ACCOUNTS DATA INTERACTION (Real-time synced) ---
     @OptIn(ExperimentalCoroutinesApi::class)
     fun getAccounts(): Flow<List<Account>> {
@@ -1180,16 +1191,7 @@ object FirebaseService {
                                 null
                             }
                         }
-                        val updatedLocal = localAccounts.value.toMutableList()
-                        accounts.forEach { remote ->
-                            val idx = updatedLocal.indexOfFirst { it.accountId == remote.accountId }
-                            if (idx != -1) {
-                                updatedLocal[idx] = remote
-                            } else {
-                                updatedLocal.add(remote)
-                            }
-                        }
-                        localAccounts.value = updatedLocal
+                        localAccounts.value = mergeRemoteAccounts(snapshot.documents.map { it.id }.toSet(), accounts)
                         accountsLoaded = true
                     }
                 }
@@ -1201,20 +1203,7 @@ object FirebaseService {
 
         return combine(rawAccountsFlow, getTransactions()) { rawAccounts, transactions ->
             rawAccounts.map { account ->
-                val nonIgnoredTx = transactions.filter { !it.isIgnored && it.status == TransactionStatus.CONFIRMED }
-                val debitSum = nonIgnoredTx.filter { it.debitAccountId == account.accountId }.sumOf { it.amount }
-                val creditSum = nonIgnoredTx.filter { it.creditAccountId == account.accountId }.sumOf { it.amount }
-                
-                val isAssetOrLiability = account.accountType == "ASSET" || account.accountType == "LIABILITY"
-                val baseOpening = if (isAssetOrLiability) account.openingBalance else 0.0
-                
-                val currentBalance = if (account.accountType == "LIABILITY") {
-                    baseOpening + creditSum - debitSum
-                } else {
-                    baseOpening + debitSum - creditSum
-                }
-                
-                account.copy(balance = currentBalance)
+                account.copy(balance = LedgerRules.balance(account, transactions))
             }
         }
     }
@@ -1312,42 +1301,7 @@ object FirebaseService {
     }
 
     // --- TRANSACTIONS DATA INTERACTION ---
-    fun translateTransactionToLedger(tx: Transaction): Transaction {
-        val finalId = if (tx.transactionId.isNotEmpty()) tx.transactionId else tx.id
-        val finalDate = if (tx.date != 0L) tx.date else tx.timestamp
-        val finalPayee = if (tx.payeeName.isNotEmpty()) tx.payeeName else tx.narration
-        
-        val entryTypeStr = tx.type.name
-        val (debit, credit) = when (tx.type) {
-            TransactionType.EXPENSE -> {
-                Pair(tx.category.ifEmpty { "Others" }, tx.accountId)
-            }
-            TransactionType.INCOME -> {
-                Pair(tx.accountId, tx.category.ifEmpty { "Salary" })
-            }
-            TransactionType.TRANSFER -> {
-                Pair(tx.targetAccountId ?: "", tx.accountId)
-            }
-        }
-        
-        return tx.copy(
-            transactionId = finalId,
-            id = finalId,
-            amount = tx.amount,
-            date = finalDate,
-            timestamp = finalDate,
-            payeeName = finalPayee,
-            narration = finalPayee,
-            debitAccountId = debit,
-            creditAccountId = credit,
-            entryType = entryTypeStr,
-            isIgnored = tx.isIgnored,
-            category = tx.category,
-            accountId = tx.accountId,
-            targetAccountId = tx.targetAccountId,
-            tag = tx.tag
-        )
-    }
+    fun translateTransactionToLedger(tx: Transaction): Transaction = LedgerRules.toLedger(tx)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     fun getTransactions(): Flow<List<Transaction>> {
@@ -1387,53 +1341,58 @@ object FirebaseService {
         return false // Unified double-entry system handles transfers in a single document
     }
 
+    /**
+     * Recomputes this month's spend for every budget the expense counts toward, from the
+     * transactions themselves (so edits, deletes and new months are handled), and alerts once,
+     * when this expense pushes a budget over its limit.
+     */
     private suspend fun processBudgetEnforcement(tx: Transaction) {
-        if (tx.type != TransactionType.EXPENSE) return
-        
+        if (tx.type != TransactionType.EXPENSE || tx.status != TransactionStatus.CONFIRMED || tx.isIgnored) return
+
+        val grouping: (String) -> Pair<String, String> = { category ->
+            val catObj = localAccounts.value.find { it.name.equals(category, ignoreCase = true) || it.id.equals(category, ignoreCase = true) }
+            Pair(catObj?.mainCategory?.trim() ?: "", catObj?.subCategory?.trim() ?: category)
+        }
         val category = tx.category.trim()
-        val catObj = localAccounts.value.find { it.name.equals(category, ignoreCase = true) || it.id.equals(category, ignoreCase = true) }
-        val mainCat = catObj?.mainCategory?.trim() ?: ""
-        val subCat = catObj?.subCategory?.trim() ?: category
+        val (mainCat, subCat) = grouping(category)
+        // Count this expense even if the local list has not picked it up yet.
+        val allTx = localTransactions.value.filter { it.transactionId != tx.transactionId } + tx
 
         val allBudgets = localBudgets.value.toMutableList()
         var modified = false
 
         for (i in allBudgets.indices) {
             val budget = allBudgets[i]
-            val matchesSub = budget.subCategory.isNotBlank() && (budget.subCategory.equals(subCat, ignoreCase = true) || budget.subCategory.equals(category, ignoreCase = true))
-            val matchesMain = budget.mainCategory.isNotBlank() && (budget.mainCategory.equals(mainCat, ignoreCase = true) || budget.mainCategory.equals(category, ignoreCase = true)) && budget.subCategory.isBlank()
-            val matchesLegacy = budget.category.isNotBlank() && (budget.category.equals(category, ignoreCase = true) || budget.category.equals(mainCat, ignoreCase = true) || budget.category.equals(subCat, ignoreCase = true))
+            if (!LedgerRules.budgetMatches(budget, category, mainCat, subCat)) continue
 
-            if (matchesSub || matchesMain || matchesLegacy) {
-                val newSpent = budget.currentSpent + tx.amount
-                val updatedBudget = budget.copy(currentSpent = newSpent)
-                allBudgets[i] = updatedBudget
-                modified = true
+            val newSpent = LedgerRules.monthlySpent(budget, allTx, tx.timestamp, grouping)
+            val previousSpent = newSpent - tx.amount
+            val updatedBudget = budget.copy(currentSpent = newSpent)
+            allBudgets[i] = updatedBudget
+            modified = true
 
-                if (newSpent > budget.monthlyLimit) {
-                    val label = if (budget.subCategory.isNotBlank()) "${budget.mainCategory} › ${budget.subCategory}" else budget.mainCategory.ifBlank { budget.category }
-                    if (budget.budgetType == BudgetType.SOFT) {
-                        val warnString = "SOFT Limit Warning: $label spent ₹$newSpent exceeds monthly limit ₹${budget.monthlyLimit} (Difference: ₹${newSpent - budget.monthlyLimit})"
-                        softBudgetWarnings.value = softBudgetWarnings.value + warnString
-                        Log.d("BudgetEnforcement", "Append soft budget alert: $warnString")
-                    } else if (budget.budgetType == BudgetType.HARD) {
-                        Log.d("BudgetEnforcement", "Triggering local background push notification for Hard Budget category '$label'!")
-                        appContext?.let { ctx ->
-                            try {
-                                triggerLocalNotification(ctx, label, budget.monthlyLimit, newSpent)
-                            } catch (e: Exception) {
-                                Log.e("BudgetEnforcement", "Notification error: ${e.message}")
-                            }
+            val justCrossed = newSpent > budget.monthlyLimit && previousSpent <= budget.monthlyLimit
+            if (justCrossed) {
+                val label = if (budget.subCategory.isNotBlank()) "${budget.mainCategory} › ${budget.subCategory}" else budget.mainCategory.ifBlank { budget.category }
+                if (budget.budgetType == BudgetType.SOFT) {
+                    val warnString = "SOFT Limit Warning: $label spent ₹$newSpent exceeds monthly limit ₹${budget.monthlyLimit} (Difference: ₹${newSpent - budget.monthlyLimit})"
+                    softBudgetWarnings.value = softBudgetWarnings.value + warnString
+                } else if (budget.budgetType == BudgetType.HARD) {
+                    appContext?.let { ctx ->
+                        try {
+                            triggerLocalNotification(ctx, label, budget.monthlyLimit, newSpent)
+                        } catch (e: Exception) {
+                            Log.e("BudgetEnforcement", "Notification error: ${e.message}")
                         }
                     }
                 }
+            }
 
-                firestore?.let { fs ->
-                    try {
-                        fs.collection("budgets").document(updatedBudget.budgetId).set(updatedBudget, SetOptions.merge())
-                    } catch (e: Exception) {
-                        Log.e("FirebaseService", "Firestore budget writing error: ${e.message}")
-                    }
+            firestore?.let { fs ->
+                try {
+                    fs.collection("budgets").document(updatedBudget.budgetId).set(updatedBudget, SetOptions.merge())
+                } catch (e: Exception) {
+                    Log.e("FirebaseService", "Firestore budget writing error: ${e.message}")
                 }
             }
         }
@@ -1542,6 +1501,9 @@ object FirebaseService {
 
         val updatedList = localTransactions.value.map { if (it.transactionId == ledgerTx.transactionId) ledgerTx else it }
         localTransactions.value = updatedList
+
+        // Confirming a reviewed item, or changing its category or amount, can move a budget.
+        processBudgetEnforcement(ledgerTx)
 
         if (useFallback.value || firestore == null) {
             return

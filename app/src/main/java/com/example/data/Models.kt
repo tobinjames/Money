@@ -79,11 +79,18 @@ data class Account(
     val name: String get() = accountName
     
     @get:Exclude
-    val type: AccountType get() = when (accountType) {
-        "ASSET" -> AccountType.SAVINGS_ACCOUNT
-        "LIABILITY" -> AccountType.CREDIT_CARD
+    val type: AccountType get() = when {
+        accountType == "LIABILITY" && mainCategory.equals("Loans", ignoreCase = true) -> AccountType.LOAN
+        accountType == "LIABILITY" -> AccountType.CREDIT_CARD
+        accountType == "ASSET" && mainCategory.equals("Fixed Deposits", ignoreCase = true) -> AccountType.FIXED_DEPOSIT
+        accountType == "ASSET" && mainCategory.equals("Mutual Funds", ignoreCase = true) -> AccountType.MUTUAL_FUND
         else -> AccountType.SAVINGS_ACCOUNT
     }
+
+    // Older loan accounts were saved without customMainCategory; their loan fields still give them away.
+    @get:Exclude
+    val looksLikeLoan: Boolean get() =
+        accountType == "LIABILITY" && (annualInterestRate > 0.0 || monthlyEmi > 0.0 || remainingMonths > 0)
     
     @get:Exclude
     val accountClass: String get() = customAccountClass.ifBlank { accountType }
@@ -92,7 +99,7 @@ data class Account(
     val mainCategory: String get() = customMainCategory.ifBlank {
         when (accountType) {
             "ASSET" -> "Bank Accounts"
-            "LIABILITY" -> "Credit Cards"
+            "LIABILITY" -> if (looksLikeLoan) "Loans" else "Credit Cards"
             "INCOME" -> "Direct Income"
             "EXPENSE" -> "Indirect Expenses"
             else -> "Bank Accounts"
