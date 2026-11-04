@@ -1,17 +1,16 @@
 package com.example.ai
 
 import android.util.Log
-import com.example.BuildConfig
 import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import com.google.firebase.Firebase
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.GenerativeBackend
+import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 import com.example.data.*
 
 @JsonClass(generateAdapter = true)
@@ -35,14 +34,9 @@ object GeminiSmsParser {
         .addLast(KotlinJsonAdapterFactory())
         .build()
         
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .build()
-
     /**
-     * Parses the raw SMS contents using Google's Gemini-3.5-flash model via direct REST invocation.
+     * Parses the raw SMS contents with Gemini through Firebase AI Logic. No API key ships in the
+     * app: requests are authorised by the Firebase project (protect it further with App Check).
      * Incorporates dual-layer local merchant rules and custom category overrides.
      */
     suspend fun parseSms(
@@ -85,14 +79,6 @@ object GeminiSmsParser {
             }
         }
 
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY" || apiKey == "MY_NEW_API_KEY_DEFAULT_VALUE") {
-            Log.e(TAG, "Gemini API Key is missing or default. Falling back to local regex backup parser.")
-            return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
-        }
-
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL_NAME:generateContent?key=$apiKey"
-        
         val bankAccountsList = accountsList.map { "${it.accountName} (xx${it.lastFourDigits})" }.joinToString(", ")
         
         // Step 2: Formulate dynamic prompt payload
@@ -134,92 +120,37 @@ object GeminiSmsParser {
             """.trimIndent()
         }
 
-        val jsonRequest = """
-            {
-               "contents": [
-                 {
-                   "parts": [
-                     { "text": ${escapeJsonString(rawText)} }
-                   ]
-                 }
-               ],
-               "systemInstruction": {
-                 "parts": [
-                   { "text": ${escapeJsonString(systemInstruction)} }
-                 ]
-               },
-               "generationConfig": {
-                 "responseMimeType": "application/json",
-                 "temperature": 0.1
-               }
-             }
-        """.trimIndent()
-
-        val mediaType = "application/json; charset=utf-8".toMediaType()
-        val requestBody = jsonRequest.toRequestBody(mediaType)
-        
-        val request = Request.Builder()
-            .url(url)
-            .post(requestBody)
-            .build()
-
         try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Gemini REST request failed with code: ${response.code}. Body: ${response.body?.string()}")
-                    return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
+            val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                modelName = MODEL_NAME,
+                generationConfig = generationConfig {
+                    responseMimeType = "application/json"
+                    temperature = 0.1f
+                },
+                systemInstruction = content { text(systemInstruction) }
+            )
+            val extractedText = model.generateContent(rawText).text
+                ?: return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
+
+            val adapter = moshi.adapter(ParsedTransactionResponse::class.java)
+            val parsedObj = adapter.fromJson(extractedText.trim())
+
+            return@withContext parsedObj?.let { obj ->
+                if (obj.ignore == true) {
+                    Log.d(TAG, "Gemini classified this message as non-transactional (ignore = true). Skipping from accounting.")
+                    return@withContext null
                 }
-                
-                val responseBody = response.body?.string() ?: return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
-                Log.d(TAG, "Gemini Response Raw: $responseBody")
-                
-                val extractedText = extractTextFromGeminiJson(responseBody) ?: return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
-                Log.d(TAG, "Extracted JSON String from Gemini: $extractedText")
-                
-                // Record telemetry audit log
-                GeminiTelemetryLogger.logInteraction(rawText, extractedText)
-                
-                val adapter = moshi.adapter(ParsedTransactionResponse::class.java)
-                val parsedObj = adapter.fromJson(extractedText.trim())
-                
-                return@withContext parsedObj?.let { obj ->
-                    if (obj.ignore == true) {
-                        Log.d(TAG, "Gemini classified this message as non-transactional (ignore = true). Skipping from accounting.")
-                        return@withContext null
-                    }
-                    val finalCat = obj.matchedCategory ?: obj.suggestedCategory.ifEmpty { "Unknown" }
-                    val finalAcc = obj.matchedAccount ?: obj.assignedAccount
-                    obj.copy(
-                        suggestedCategory = finalCat,
-                        assignedAccount = finalAcc
-                    )
-                } ?: runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
-            }
+                val finalCat = obj.matchedCategory ?: obj.suggestedCategory.ifEmpty { "Unknown" }
+                val finalAcc = obj.matchedAccount ?: obj.assignedAccount
+                obj.copy(
+                    suggestedCategory = finalCat,
+                    assignedAccount = finalAcc
+                )
+            } ?: runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception during Gemini SMS parsing REST call: ${e.message}", e)
+            Log.e(TAG, "Gemini SMS parsing failed (${e.javaClass.simpleName}); using local regex parser.")
             return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
         }
-    }
-
-    private fun extractTextFromGeminiJson(rawJson: String): String? {
-        try {
-            // Traverse response structure: candidates[0].content.parts[0].text
-            val mapAdapter = moshi.adapter(Map::class.java)
-            val root = mapAdapter.fromJson(rawJson) as? Map<*, *> ?: return null
-            val candidates = root["candidates"] as? List<*> ?: return null
-            val firstCandidate = candidates.firstOrNull() as? Map<*, *> ?: return null
-            val content = firstCandidate["content"] as? Map<*, *> ?: return null
-            val parts = content["parts"] as? List<*> ?: return null
-            val firstPart = parts.firstOrNull() as? Map<*, *> ?: return null
-            return firstPart["text"] as? String
-        } catch (e: Exception) {
-            Log.e(TAG, "Error structural-parsing Gemini JSON response: ${e.message}")
-            return null
-        }
-    }
-
-    private fun escapeJsonString(input: String): String {
-        return moshi.adapter(String::class.java).toJson(input)
     }
 
     /**

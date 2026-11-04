@@ -1,0 +1,82 @@
+rules_version = '2';
+
+// Security rules for the Family Expense Tracker.
+//
+// Access model: a signed-in user with a verified email is a family member
+// when their (lower-case) email is on the allowlist that the app already
+// checks at sign-in:
+//   - AuthorizedUsers/{email} or whitelisted_userlist/{email}
+//     (a document whose ID is the email, optional isActive/enabled flag), or
+//   - AuthorizedUsers/master_whitelist with an `emails` array.
+// The allowlist itself can only be edited from the Firebase console.
+//
+// Deploy with `firebase deploy --only firestore:rules`, or paste this file
+// into Firebase console > Firestore Database > Rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function verified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function activeEntry(coll) {
+      let path = /databases/$(database)/documents/$(coll)/$(myEmail());
+      return exists(path)
+        && get(path).data.get('isActive', get(path).data.get('enabled', true)) != false;
+    }
+
+    function inMasterList() {
+      return myEmail() in get(/databases/$(database)/documents/AuthorizedUsers/master_whitelist).data.get('emails', []);
+    }
+
+    function isMember() {
+      return signedIn() && verified()
+        && (activeEntry('AuthorizedUsers') || activeEntry('whitelisted_userlist') || inMasterList());
+    }
+
+    // Allowlist: a user may read only their own entry. No client writes.
+    match /AuthorizedUsers/{entry} {
+      allow get: if signedIn()
+        && (entry == myEmail() || (entry == 'master_whitelist' && myEmail() in resource.data.get('emails', [])));
+      allow list: if signedIn() && resource.data.email == myEmail();
+      allow write: if false;
+    }
+    match /whitelisted_userlist/{entry} {
+      allow get: if signedIn()
+        && (entry == myEmail() || (entry == 'master_whitelist' && myEmail() in resource.data.get('emails', [])));
+      allow list: if signedIn() && resource.data.email == myEmail();
+      allow write: if false;
+    }
+
+    // Shared family data.
+    match /Transactions/{id}        { allow read, write: if isMember(); }
+    match /ChartOfAccounts/{id}     { allow read, write: if isMember(); }
+    match /budgets/{id}             { allow read, write: if isMember(); }
+    match /reminders/{id}           { allow read, write: if isMember(); }
+    match /whitelisted_senders/{id} { allow read, write: if isMember(); }
+    match /manual_mappings/{id}     { allow read, write: if isMember(); }
+    match /merchant_rules/{id}      { allow read, write: if isMember(); }
+    match /privacy_keywords/{id}    { allow read, write: if isMember(); }
+    match /family_groups/{id}       { allow read, write: if isMember(); }
+    match /connection_tests/{id}    { allow read, write: if isMember(); }
+
+    // A member can read every profile but only write their own.
+    match /users/{uid} {
+      allow read: if isMember();
+      allow write: if isMember() && uid == request.auth.uid;
+    }
+
+    // Old raw-SMS telemetry. The app no longer writes it; keep it closed.
+    match /GeminiInteractionLogs/{id} { allow read, write: if false; }
+
+    // Everything else is denied by default.
+  }
+}

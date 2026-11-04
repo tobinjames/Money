@@ -33,7 +33,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.data.AuthState
+import com.example.data.EmailVerificationRequiredException
 import com.example.data.FirebaseService
 import com.example.ui.viewmodel.ExpenseViewModel
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -64,15 +66,15 @@ fun AuthScreen(
         try {
             val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
             val account = task.getResult(ApiException::class.java)
-            if (account != null) {
-                val email = account.email ?: ""
-                val displayName = account.displayName ?: ""
-                val uid = account.id ?: "google_uid"
+            val idToken = account?.idToken
+            if (account != null && idToken.isNullOrBlank()) {
+                authErrorMessage = "Google Sign-In: no ID token returned. Check GOOGLE_WEB_CLIENT_ID and the app's SHA-1 in Firebase."
+            } else if (account != null && idToken != null) {
                 authLoading = true
                 authErrorMessage = null
                 coroutineScope.launch {
                     try {
-                        FirebaseService.authenticateWithGoogle(uid, displayName, email)
+                        FirebaseService.signInWithGoogleIdToken(idToken)
                         Toast.makeText(context, "Google Authorization Successful!", Toast.LENGTH_SHORT).show()
                     } catch (e: Throwable) {
                         authErrorMessage = e.message ?: "Authentication failed."
@@ -304,7 +306,13 @@ fun AuthScreen(
                                     onClick = {
                                         authErrorMessage = null
                                         try {
+                                            val webClientId = BuildConfig.GOOGLE_WEB_CLIENT_ID
+                                            if (webClientId.isBlank() || webClientId == "YOUR_WEB_CLIENT_ID") {
+                                                authErrorMessage = "Google Sign-In is not configured: set GOOGLE_WEB_CLIENT_ID in .env (Firebase console > Authentication > Google > Web client ID)."
+                                                return@Button
+                                            }
                                             val googleSignInOptions = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                                                .requestIdToken(webClientId)
                                                 .requestEmail()
                                                 .build()
                                             val googleSignInClient = GoogleSignIn.getClient(context, googleSignInOptions)
@@ -350,7 +358,9 @@ fun AuthScreen(
                                                 }
                                             } catch (e: Exception) {
                                                 authErrorMessage = e.message ?: "Authentication failed."
-                                                FirebaseService.authStateVal.value = AuthState.DENIED
+                                                if (e !is EmailVerificationRequiredException) {
+                                                    FirebaseService.authStateVal.value = AuthState.DENIED
+                                                }
                                             } finally {
                                                 authLoading = false
                                             }

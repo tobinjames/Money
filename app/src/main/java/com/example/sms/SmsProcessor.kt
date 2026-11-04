@@ -76,8 +76,19 @@ object SmsProcessor {
      * Core processing logic: parsing, category matches, accounts mapping, EMI split & updates database
      */
     suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long) {
-        Log.d(TAG, "Processing SMS from $sender received at $timestamp: $body")
+        Log.d(TAG, "Processing SMS from $sender received at $timestamp (${body.length} chars)")
         
+        // Nothing can be read or saved before sign-in (Firestore rules). Leave the message in the
+        // inbox, without moving the "last processed" marker, so reconciliation picks it up later.
+        if (!FirebaseService.hasSignedInUser()) {
+            Log.w(TAG, "No signed-in user; deferring SMS processing.")
+            return
+        }
+
+        // Make sure accounts and transactions come from Firestore (server or offline cache), not the
+        // still-empty in-memory lists of a freshly started background process.
+        FirebaseService.ensureCoreDataLoaded()
+
         // Query current senders and accounts
         val whitelisted = FirebaseService.getWhitelistedSenders().first()
         val accounts = FirebaseService.getAccounts().first()
@@ -102,7 +113,7 @@ object SmsProcessor {
 
         // Parse through Gemini (with local regex fallback)
         val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return
-        Log.d(TAG, "Parsed Transaction: $parsed")
+        Log.d(TAG, "Parsed transaction: type=${parsed.transactionType}, category=${parsed.suggestedCategory}")
 
         // 2. Map transaction to an Account using lastFourDigits match first, then dynamic Gemini matching
         var targetAccount: Account? = null
