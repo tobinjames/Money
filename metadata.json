@@ -1,0 +1,6 @@
+{
+  "name": "Family Expense Tracker",
+  "description": "A collaborative personal and family expense management application shared between husband and wife, featuring real-time syncing, Gemini-powered automated SMS categorization, and detailed financial reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
