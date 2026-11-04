@@ -25,62 +25,17 @@ import com.example.data.AccountType
 import com.example.data.Transaction
 import com.example.data.TransactionType
 import com.example.data.TransactionStatus
+import com.example.domain.LedgerRules
 import com.example.ui.viewmodel.ExpenseViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
+// Same ledger rules the account balances and the reconciliation adjustment use.
 private fun calculateBalanceAsOf(
     account: Account,
     targetDate: Long,
     allTransactions: List<Transaction>
-): Double {
-    var balance = account.balance
-    
-    // Reverse any transactions that occurred after targetDate
-    val txsAfterTarget = allTransactions.filter { 
-        it.status == TransactionStatus.CONFIRMED && 
-        !it.isIgnored && 
-        it.timestamp > targetDate 
-    }
-    
-    for (tx in txsAfterTarget) {
-        when (tx.type) {
-            TransactionType.INCOME -> {
-                if (tx.accountId == account.id) {
-                    balance -= tx.amount
-                }
-            }
-            TransactionType.EXPENSE -> {
-                if (tx.accountId == account.id) {
-                    if (account.type == AccountType.CREDIT_CARD || account.type == AccountType.LOAN) {
-                        balance -= tx.amount
-                    } else {
-                        balance += tx.amount
-                    }
-                }
-            }
-            TransactionType.TRANSFER -> {
-                if (tx.accountId == account.id) {
-                    if (account.type == AccountType.CREDIT_CARD) {
-                        balance -= tx.amount
-                    } else {
-                        balance += tx.amount
-                    }
-                }
-                if (tx.targetAccountId == account.id) {
-                    if (account.type == AccountType.CREDIT_CARD) {
-                        balance += tx.amount
-                    } else if (account.type == AccountType.LOAN) {
-                        balance -= tx.amount
-                    } else {
-                        balance -= tx.amount
-                    }
-                }
-            }
-        }
-    }
-    return balance
-}
+): Double = LedgerRules.balance(account, allTransactions, LedgerRules.endOfDay(targetDate))
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

@@ -12,6 +12,7 @@ import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.data.*
+import com.example.domain.SmsAmountParser
 
 @JsonClass(generateAdapter = true)
 data class ParsedTransactionResponse(
@@ -169,22 +170,9 @@ object GeminiSmsParser {
         
         val transactionType = if (isCredit && !isDebit) "CREDIT" else "DEBIT"
         
-        // Extract amount: locate numbers following currency indicators (Rs, INR, $, USD) or standard digits
-        var amount = 0.0
-        val amountRegex = Regex("""(?:rs\.?|inr|usd|\$)\s*([\d,]+\.?\d*)""", RegexOption.IGNORE_CASE)
-        val match = amountRegex.find(lower)
-        if (match != null) {
-            val amtStr = match.groupValues[1].replace(",", "")
-            amount = amtStr.toDoubleOrNull() ?: 0.0
-        } else {
-            // Try standard fallback
-            val simpleDigitRegex = Regex("""\b\d+\.\d{2}\b""")
-            val simpleMatch = simpleDigitRegex.find(lower)
-            if (simpleMatch != null) {
-                amount = simpleMatch.value.toDoubleOrNull() ?: 0.0
-            }
-        }
-        
+        // Extract amount, skipping balance/limit figures; 0.0 means "not found" and is rejected later.
+        val amount = SmsAmountParser.extract(smsText) ?: 0.0
+
         // Extract vendor
         var vendor = "Unknown"
         val vendorRegexes = listOf(

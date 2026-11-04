@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.domain.LedgerRules
 import com.example.data.*
 import com.example.sms.SmsProcessor
 import com.example.ai.GeminiSmsParser
@@ -293,7 +294,11 @@ class ExpenseViewModel : ViewModel() {
                         val body = c.getString(bodyCol) ?: ""
                         val date = c.getLong(dateCol)
 
-                        SmsProcessor.processSms(context, sender, body, date)
+                        val handled = SmsProcessor.processSms(context, sender, body, date)
+                        if (!handled) break // not signed in yet; resume from here next time
+                        // Move the cursor past every scanned SMS, bank or not, so the next scan
+                        // doesn't start over from the last bank message.
+                        SmsProcessor.updateLastProcessedTimestamp(context, date)
                         processedCount++
                     }
                     Log.d(TAG, "Reconciliation completed: processed $processedCount missed background transactions.")
@@ -324,7 +329,7 @@ class ExpenseViewModel : ViewModel() {
                 // Handle Interest Calculations dynamically if target option is a loan and custom entry relates to EMI
                 val rawAccounts = accounts.value
                 val currentAccount = rawAccounts.find { it.id == accountId }
-                val potentialLoanAcc = targetAccountId?.let { id -> rawAccounts.find { id == id && it.type == AccountType.LOAN } }
+                val potentialLoanAcc = targetAccountId?.let { id -> rawAccounts.find { it.id == id && it.type == AccountType.LOAN } }
                 
                 val ownerUid = currentAccount?.ownerUserId?.takeIf { it.isNotEmpty() } ?: currentUserUid.value ?: "user_default"
                 val ownerName = currentAccount?.ownerFirstName?.takeIf { it.isNotEmpty() } ?: currentUserFirstName.value ?: "User"
@@ -338,9 +343,7 @@ class ExpenseViewModel : ViewModel() {
                     val interestComponent = (outstanding * (annualRate / 100.0)) / 12.0
                     val principalComponent = (amount - interestComponent).coerceAtLeast(0.0)
 
-                    // Adjust balances on Loan: reduce liability by principal
-                    val updatedLoanBalance = loanAcc.balance + principalComponent
-                    FirebaseService.updateAccount(loanAcc.copy(balance = updatedLoanBalance))
+                    // The loan balance comes from the ledger: the principal transfer below reduces it.
 
                     // Track principal transfer transaction
                     val principalTx = Transaction(
@@ -568,7 +571,11 @@ class ExpenseViewModel : ViewModel() {
                 lastFourDigits = lastFourDigits,
                 iconName = iconName,
                 billingCycleDay = billingCycleDay,
-                paymentDueDay = paymentDueDay
+                paymentDueDay = paymentDueDay,
+                // Persist the chosen grouping; without it every liability showed up as a credit card.
+                customAccountClass = finalClass,
+                customMainCategory = finalMain,
+                customSubCategory = finalSub
             )
             FirebaseService.addAccount(acc)
             
@@ -640,10 +647,22 @@ class ExpenseViewModel : ViewModel() {
     fun reconcileAccount(accountId: String, closingDate: Long, statementBalance: Double) {
         viewModelScope.launch {
             val oldAcc = accounts.value.find { it.id == accountId } ?: return@launch
+
+            // Balances are computed from the ledger, so a difference from the statement is booked
+            // as an adjustment entry on the closing date (before the period is locked).
+            LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance)?.let { adjustment ->
+                try {
+                    FirebaseService.addTransaction(adjustment)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Could not post reconciliation adjustment: ${e.message}", e)
+                    triggerToast("Could not post the reconciliation adjustment: ${e.message}")
+                    return@launch
+                }
+            }
+
             val updated = oldAcc.copy(
                 lastReconciledDate = closingDate,
-                reconciledBalance = statementBalance,
-                balance = statementBalance
+                reconciledBalance = statementBalance
             )
             FirebaseService.updateAccount(updated)
             
