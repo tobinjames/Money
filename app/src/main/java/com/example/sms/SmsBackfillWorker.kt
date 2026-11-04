@@ -22,7 +22,14 @@ class SmsBackfillWorker(
             return Result.success()
         }
 
+        FirebaseService.initialize(context)
+        if (!FirebaseService.hasSignedInUser()) {
+            Log.w("SmsBackfillWorker", "No signed-in user; skipping SMS backfill.")
+            return Result.success()
+        }
+
         try {
+            FirebaseService.ensureCoreDataLoaded()
             val accountId = inputData.getString("accountId")
             val senderId = inputData.getString("senderId")
             

@@ -25,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -34,6 +35,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.ExistingWorkPolicy
 import com.example.sms.SmsBackfillWorker
+
+// Thrown when an email/password user must open the verification link before signing in.
+class EmailVerificationRequiredException(message: String) : Exception(message)
 
 enum class AuthState {
     LOADING,
@@ -70,6 +74,10 @@ object FirebaseService {
     val softBudgetWarnings = MutableStateFlow<List<String>>(emptyList())
     
     private var currentUserId: String? = null
+    private var allowlistUid: String? = null
+    @Volatile private var accountsLoaded = false
+    @Volatile private var transactionsLoaded = false
+    private val coreDataMutex = kotlinx.coroutines.sync.Mutex()
     private var remindersListenerRegistered = false
     private var transactionsListenerRegistered = false
     private var accountsListenerRegistered = false
@@ -80,6 +88,8 @@ object FirebaseService {
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // Safe to call repeatedly (activity, SMS worker, backfill worker): set up only once per process.
+        if (firestore != null && auth != null) return
         setupInitialMockData()
         try {
             // Check if Firebase is already initialized
@@ -88,28 +98,7 @@ object FirebaseService {
                 auth = FirebaseAuth.getInstance()
                 useFallback.value = false
                 Log.d(TAG, "Firebase initialized successfully via Google Services plugin.")
-                serviceScope.launch {
-                    val user = auth?.currentUser
-                    if (user != null) {
-                        val email = user.email ?: ""
-                        val isAuthResult = checkIsEmailAuthorized(email)
-                        if (isAuthResult) {
-                            currentUserUid.value = user.uid
-                            currentUserFirstName.value = user.displayName?.split(" ")?.firstOrNull() ?: "User"
-                            userEmail = email
-                            userName = user.displayName ?: ""
-                            syncFamilyGroupAndSpouse(user.uid)
-                            checkAndSeedFirestoreIfEmpty()
-                            authStateVal.value = AuthState.AUTHORIZED
-                        } else {
-                            logout()
-                            authStateVal.value = AuthState.DENIED
-                        }
-                    } else {
-                        // Require user to login via the AuthScreen on first-time launch
-                        authStateVal.value = AuthState.UNAUTHENTICATED
-                    }
-                }
+                restoreSession()
                 return
             }
 
@@ -126,28 +115,7 @@ object FirebaseService {
             auth = FirebaseAuth.getInstance()
             useFallback.value = false
             Log.d(TAG, "Firebase initialized programmatically with real settings.")
-            serviceScope.launch {
-                val user = auth?.currentUser
-                if (user != null) {
-                    val email = user.email ?: ""
-                    val isAuthResult = checkIsEmailAuthorized(email)
-                    if (isAuthResult) {
-                        currentUserUid.value = user.uid
-                        currentUserFirstName.value = user.displayName?.split(" ")?.firstOrNull() ?: "User"
-                        userEmail = email
-                        userName = user.displayName ?: ""
-                        syncFamilyGroupAndSpouse(user.uid)
-                        checkAndSeedFirestoreIfEmpty()
-                        authStateVal.value = AuthState.AUTHORIZED
-                    } else {
-                        logout()
-                        authStateVal.value = AuthState.DENIED
-                    }
-                } else {
-                    // Require user to login via the AuthScreen on first-time launch
-                    authStateVal.value = AuthState.UNAUTHENTICATED
-                }
-            }
+            restoreSession()
         } catch (e: Exception) {
             Log.e(TAG, "Firebase setup error: ${e.message}.")
             useFallback.value = false
@@ -155,6 +123,102 @@ object FirebaseService {
         }
     }
     
+    // Restores a persisted Firebase Auth session on app start (or in a background worker).
+    private fun restoreSession() {
+        serviceScope.launch {
+            val user = auth?.currentUser
+            if (user == null) {
+                // Require user to login via the AuthScreen on first-time launch
+                authStateVal.value = AuthState.UNAUTHENTICATED
+                return@launch
+            }
+            if (!isEmailVerified(user)) {
+                Log.w(TAG, "Stored session has an unverified email; sign-in required.")
+                logout()
+                return@launch
+            }
+            val email = user.email ?: ""
+            if (checkIsEmailAuthorized(email)) {
+                val ownerUid = ownerUidFor(user)
+                currentUserUid.value = ownerUid
+                currentUserId = ownerUid
+                if (currentUserFirstName.value == null) {
+                    currentUserFirstName.value = user.displayName?.split(" ")?.firstOrNull() ?: "User"
+                }
+                userEmail = email
+                userName = user.displayName ?: ""
+                syncFamilyGroupAndSpouse(ownerUid)
+                checkAndSeedFirestoreIfEmpty()
+                markAuthorized()
+            } else {
+                logout()
+                authStateVal.value = AuthState.DENIED
+            }
+        }
+    }
+
+    // Firestore rules require a verified email. Google accounts are always verified.
+    private fun isEmailVerified(user: com.google.firebase.auth.FirebaseUser): Boolean {
+        return user.isEmailVerified || user.providerData.any { it.providerId == GoogleAuthProvider.PROVIDER_ID }
+    }
+
+    // The family's owner id: an explicit `uid` on the allowlist entry wins (keeps records created
+    // under an older id), otherwise the Firebase Auth uid.
+    private fun ownerUidFor(user: com.google.firebase.auth.FirebaseUser): String = allowlistUid ?: user.uid
+
+    /**
+     * Loads accounts and transactions from Firestore once per process, before SMS processing reads
+     * them. Without this, a cold background process sees empty lists, so duplicate checks pass and
+     * account matching falls back to creating placeholder accounts.
+     */
+    suspend fun ensureCoreDataLoaded() {
+        val fs = firestore ?: return
+        if (auth?.currentUser == null) return
+        if (accountsLoaded && transactionsLoaded) return
+        coreDataMutex.withLock {
+            try {
+                if (!accountsLoaded) {
+                    val remote = fs.collection("ChartOfAccounts").get().awaitTask().documents.mapNotNull { doc ->
+                        try { doc.toObject(Account::class.java) } catch (e: Exception) { null }
+                    }
+                    val merged = localAccounts.value.toMutableList()
+                    remote.forEach { acc ->
+                        val idx = merged.indexOfFirst { it.accountId == acc.accountId }
+                        if (idx != -1) merged[idx] = acc else merged.add(acc)
+                    }
+                    localAccounts.value = merged
+                    accountsLoaded = true
+                }
+                if (!transactionsLoaded) {
+                    val remote = fs.collection("Transactions").get().awaitTask().documents.mapNotNull { doc ->
+                        try { doc.toObject(Transaction::class.java) } catch (e: Exception) { null }
+                    }
+                    val remoteIds = remote.map { it.transactionId }.toSet()
+                    // Keep anything added locally that has not reached the snapshot yet.
+                    localTransactions.value = remote + localTransactions.value.filter { it.transactionId !in remoteIds }
+                    transactionsLoaded = true
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not preload accounts/transactions: ${e.message}")
+            }
+        }
+    }
+
+    private fun markAuthorized() {
+        startRealtimeListeners()
+        authStateVal.value = AuthState.AUTHORIZED
+    }
+
+    // Attaches the long-lived Firestore listeners (each getter registers its listener once).
+    private fun startRealtimeListeners() {
+        getAccounts()
+        getTransactions()
+        getReminders()
+    }
+
+    // True once Firebase Auth has a signed-in user (used by background SMS processing).
+    fun hasSignedInUser(): Boolean = auth?.currentUser != null
+
     fun getDefaultMockTransactions(): List<Transaction> {
         return emptyList()
     }
@@ -751,7 +815,7 @@ object FirebaseService {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Diagnostics failed with error: ${e.message}")
-            "FAILED: ${e.localizedMessage ?: e.message}\n\nTroubleshooting Guide:\n1. Ensure you have created a Cloud Firestore Database in the Firebase Console (nestwise-5c65e).\n2. Go to the Firestore Rules Tab (in your Firebase Console) and change them to allow public/authenticated access during development. Example:\n\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}\n3. Make sure the database has been initialized in 'production mode' or 'test mode' and is active."
+            "FAILED: ${e.localizedMessage ?: e.message}\n\nTroubleshooting Guide:\n1. Ensure you have created a Cloud Firestore Database in the Firebase Console (nestwise-5c65e).\n2. Deploy the security rules from firestore.rules in the repository (Firebase Console > Firestore Database > Rules), and make sure your email is in the AuthorizedUsers collection. Never use 'allow read, write: if true'.\n3. Make sure the database has been initialized in 'production mode' or 'test mode' and is active."
         }
     }
 
@@ -805,6 +869,7 @@ object FirebaseService {
         }
         val emailLower = email.lowercase().trim()
         if (emailLower.isEmpty()) return false
+        allowlistUid = null
 
         return try {
             // 1. Direct document lookup by email ID in "AuthorizedUsers" collection
@@ -816,7 +881,8 @@ object FirebaseService {
                 val fName = docDirect.getString("firstName") ?: docDirect.getString("displayName") ?: docDirect.getString("name")
                 val sEmail = docDirect.getString("spouseEmail")
                 val sName = docDirect.getString("spouseFirstName") ?: docDirect.getString("partnerFirstName")
-                val uId = docDirect.getString("uid") ?: docDirect.getString("userId") ?: auth?.currentUser?.uid
+                allowlistUid = docDirect.getString("uid") ?: docDirect.getString("userId")
+                val uId = allowlistUid ?: auth?.currentUser?.uid
                 val sUid = docDirect.getString("spouseUid") ?: docDirect.getString("partnerUid")
                 val isActive = docDirect.getBoolean("isActive") ?: docDirect.getBoolean("enabled") ?: true
 
@@ -854,7 +920,8 @@ object FirebaseService {
                 val fName = doc.getString("firstName") ?: doc.getString("displayName") ?: doc.getString("name")
                 val sEmail = doc.getString("spouseEmail")
                 val sName = doc.getString("spouseFirstName") ?: doc.getString("partnerFirstName")
-                val uId = doc.getString("uid") ?: doc.getString("userId") ?: auth?.currentUser?.uid
+                allowlistUid = doc.getString("uid") ?: doc.getString("userId")
+                val uId = allowlistUid ?: auth?.currentUser?.uid
                 val sUid = doc.getString("spouseUid") ?: doc.getString("partnerUid")
                 val isActive = doc.getBoolean("isActive") ?: doc.getBoolean("enabled") ?: true
 
@@ -921,19 +988,27 @@ object FirebaseService {
         }
     }
 
-    // Google Single Sign-On helper using Firebase Google Sign-In Provider
-    suspend fun authenticateWithGoogle(userId: String, displayName: String, email: String) {
+    // Google Single Sign-On: exchange the Google ID token for a real Firebase Auth session,
+    // so Firestore requests carry request.auth and the session survives app restarts.
+    suspend fun signInWithGoogleIdToken(idToken: String) {
+        val fbAuth = auth ?: throw Exception("Cannot connect to server: Firebase Authentication is unavailable.")
+        val credential = GoogleAuthProvider.getCredential(idToken, null)
+        val user = fbAuth.signInWithCredential(credential).awaitTask().user
+            ?: throw Exception("Google sign-in succeeded but no Firebase user was returned.")
+        val email = user.email ?: ""
+        val displayName = user.displayName ?: email.substringBefore("@")
         val authorized = checkIsEmailAuthorized(email)
         if (authorized) {
-            val firstName = currentUserFirstName.value ?: displayName.split(" ").firstOrNull() ?: "User"
-            currentUserUid.value = userId
-            currentUserFirstName.value = firstName
+            val ownerUid = ownerUidFor(user)
+            currentUserUid.value = ownerUid
+            currentUserId = ownerUid
+            currentUserFirstName.value = currentUserFirstName.value ?: displayName.split(" ").firstOrNull() ?: "User"
             userEmail = email
             userName = displayName
-            syncFamilyGroupAndSpouse(userId)
-            saveUserProfileToFirestore(userId, email, displayName)
+            syncFamilyGroupAndSpouse(ownerUid)
+            saveUserProfileToFirestore(user.uid, email, displayName)
             checkAndSeedFirestoreIfEmpty()
-            authStateVal.value = AuthState.AUTHORIZED
+            markAuthorized()
         } else {
             logout()
             authStateVal.value = AuthState.DENIED
@@ -941,95 +1016,79 @@ object FirebaseService {
         }
     }
 
-    suspend fun signInWithEmail(email: String, password: String): String = suspendCancellableCoroutine { continuation ->
-        val fbAuth = auth
-        if (fbAuth == null) {
-            continuation.resumeWith(Result.failure(Exception("Cannot connect to server: Firebase Authentication is unavailable.")))
-            return@suspendCancellableCoroutine
+    suspend fun signInWithEmail(email: String, password: String): String {
+        val fbAuth = auth ?: throw Exception("Cannot connect to server: Firebase Authentication is unavailable.")
+        val user = fbAuth.signInWithEmailAndPassword(email, password).awaitTask().user
+            ?: throw Exception("Login succeeded but user is null")
+        if (!isEmailVerified(user)) {
+            try {
+                user.sendEmailVerification().awaitTask()
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not send verification email: ${e.message}")
+            }
+            logout()
+            throw EmailVerificationRequiredException("Please verify your email address first. We've sent a verification link to ${user.email ?: email}; open it, then sign in again.")
         }
-        fbAuth.signInWithEmailAndPassword(email, password)
-            .addOnSuccessListener { result ->
-                val user = result.user
-                if (user != null) {
-                    val uEmail = user.email ?: email
-                    serviceScope.launch {
-                        val authorized = checkIsEmailAuthorized(uEmail)
-                        if (authorized) {
-                            val uid = user.uid
-                            val displayName = user.displayName ?: email.substringBefore("@")
-                            currentUserUid.value = uid
-                            currentUserFirstName.value = currentUserFirstName.value ?: displayName.split(" ").firstOrNull() ?: "User"
-                            userEmail = uEmail
-                            userName = displayName
-                            syncFamilyGroupAndSpouse(uid)
-                            saveUserProfileToFirestore(uid, uEmail, displayName)
-                            checkAndSeedFirestoreIfEmpty()
-                            authStateVal.value = AuthState.AUTHORIZED
-                            continuation.resume(uid)
-                        } else {
-                            logout()
-                            authStateVal.value = AuthState.DENIED
-                            continuation.resumeWith(Result.failure(Exception("Access Denied: Your email address ($uEmail) is not in the 'AuthorizedUsers' collection.")))
-                        }
-                    }
-                } else {
-                    continuation.resumeWith(Result.failure(Exception("Login succeeded but user is null")))
-                }
-            }
-            .addOnFailureListener { e ->
-                continuation.resumeWith(Result.failure(e))
-            }
+        val uEmail = user.email ?: email
+        if (!checkIsEmailAuthorized(uEmail)) {
+            logout()
+            authStateVal.value = AuthState.DENIED
+            throw Exception("Access Denied: Your email address ($uEmail) is not in the 'AuthorizedUsers' collection.")
+        }
+        val ownerUid = ownerUidFor(user)
+        val displayName = user.displayName ?: email.substringBefore("@")
+        currentUserUid.value = ownerUid
+        currentUserId = ownerUid
+        currentUserFirstName.value = currentUserFirstName.value ?: displayName.split(" ").firstOrNull() ?: "User"
+        userEmail = uEmail
+        userName = displayName
+        syncFamilyGroupAndSpouse(ownerUid)
+        saveUserProfileToFirestore(user.uid, uEmail, displayName)
+        checkAndSeedFirestoreIfEmpty()
+        markAuthorized()
+        return user.uid
     }
 
-    suspend fun signUpWithEmail(email: String, password: String, displayName: String): String = suspendCancellableCoroutine { continuation ->
-        val fbAuth = auth
-        if (fbAuth == null) {
-            continuation.resumeWith(Result.failure(Exception("Cannot connect to server: Firebase Authentication is unavailable.")))
-            return@suspendCancellableCoroutine
-        }
-        serviceScope.launch {
-            val authorized = checkIsEmailAuthorized(email)
-            if (!authorized) {
-                authStateVal.value = AuthState.DENIED
-                continuation.resumeWith(Result.failure(Exception("Access Denied: Your email address ($email) is not in the 'AuthorizedUsers' collection.")))
-                return@launch
+    // Creates the account, then checks the allowlist. The allowlist can only be read by a
+    // signed-in user (see firestore.rules), so the check has to happen after sign-up.
+    suspend fun signUpWithEmail(email: String, password: String, displayName: String): String {
+        val fbAuth = auth ?: throw Exception("Cannot connect to server: Firebase Authentication is unavailable.")
+        val user = fbAuth.createUserWithEmailAndPassword(email, password).awaitTask().user
+            ?: throw Exception("Sign up returned success but user is null")
+        if (!checkIsEmailAuthorized(user.email ?: email)) {
+            try {
+                user.delete().awaitTask()
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not remove unauthorized account: ${e.message}")
             }
-            fbAuth.createUserWithEmailAndPassword(email, password)
-                .addOnSuccessListener { result ->
-                    val user = result.user
-                    if (user != null) {
-                        val uid = user.uid
-                        val profileUpdates = UserProfileChangeRequest.Builder()
-                            .setDisplayName(displayName)
-                            .build()
-                        user.updateProfile(profileUpdates)
-                            .addOnCompleteListener {
-                                currentUserUid.value = uid
-                                currentUserFirstName.value = displayName.split(" ").firstOrNull() ?: "User"
-                                userEmail = email
-                                userName = displayName
-                                
-                                serviceScope.launch {
-                                    syncFamilyGroupAndSpouse(uid)
-                                    saveUserProfileToFirestore(uid, email, displayName)
-                                    checkAndSeedFirestoreIfEmpty()
-                                }
-                                authStateVal.value = AuthState.AUTHORIZED
-                                continuation.resume(uid)
-                            }
-                    } else {
-                        continuation.resumeWith(Result.failure(Exception("Sign up returned success but user is null")))
-                    }
-                }
-                .addOnFailureListener { e ->
-                    continuation.resumeWith(Result.failure(e))
-                }
+            logout()
+            authStateVal.value = AuthState.DENIED
+            throw Exception("Access Denied: Your email address ($email) is not in the 'AuthorizedUsers' collection.")
         }
+        try {
+            user.updateProfile(UserProfileChangeRequest.Builder().setDisplayName(displayName).build()).awaitTask()
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not set display name: ${e.message}")
+        }
+        user.sendEmailVerification().awaitTask()
+        logout()
+        throw EmailVerificationRequiredException("Account created. We've sent a verification link to $email; open it, then sign in.")
     }
 
     // Sign out helper
     fun logout() {
         auth?.signOut()
+        appContext?.let { ctx ->
+            try {
+                com.google.android.gms.auth.api.signin.GoogleSignIn.getClient(
+                    ctx,
+                    com.google.android.gms.auth.api.signin.GoogleSignInOptions.DEFAULT_SIGN_IN
+                ).signOut()
+            } catch (e: Exception) {
+                Log.w(TAG, "Google sign-out failed: ${e.message}")
+            }
+        }
+        allowlistUid = null
         currentUserUid.value = null
         currentUserFirstName.value = null
         spouseUserUid.value = null
@@ -1102,12 +1161,15 @@ object FirebaseService {
     @OptIn(ExperimentalCoroutinesApi::class)
     fun getAccounts(): Flow<List<Account>> {
         val fs = firestore
-        if (fs != null && !useFallback.value && !accountsListenerRegistered) {
+        // Only attach once signed in: Firestore rules reject anonymous reads, and a rejected
+        // listener stops for good. startRealtimeListeners() attaches it after sign-in.
+        if (fs != null && auth?.currentUser != null && !useFallback.value && !accountsListenerRegistered) {
             accountsListenerRegistered = true
             fs.collection("ChartOfAccounts")
                 .addSnapshotListener { snapshot, error ->
                     if (error != null) {
                         Log.w(TAG, "ChartOfAccounts listener error: ${error.message}.")
+                        accountsListenerRegistered = false
                         return@addSnapshotListener
                     }
                     if (snapshot != null) {
@@ -1128,6 +1190,7 @@ object FirebaseService {
                             }
                         }
                         localAccounts.value = updatedLocal
+                        accountsLoaded = true
                     }
                 }
         }
@@ -1289,12 +1352,15 @@ object FirebaseService {
     @OptIn(ExperimentalCoroutinesApi::class)
     fun getTransactions(): Flow<List<Transaction>> {
         val fs = firestore
-        if (fs != null && !useFallback.value && !transactionsListenerRegistered) {
+        // Only attach once signed in: Firestore rules reject anonymous reads, and a rejected
+        // listener stops for good. startRealtimeListeners() attaches it after sign-in.
+        if (fs != null && auth?.currentUser != null && !useFallback.value && !transactionsListenerRegistered) {
             transactionsListenerRegistered = true
             fs.collection("Transactions")
                 .addSnapshotListener { snapshot, error ->
                     if (error != null) {
                         Log.w(TAG, "Transactions listener error: ${error.message}")
+                        transactionsListenerRegistered = false
                         return@addSnapshotListener
                     }
                     if (snapshot != null) {
@@ -1306,6 +1372,7 @@ object FirebaseService {
                             }
                         }
                         localTransactions.value = items
+                        transactionsLoaded = true
                     }
                 }
         }
@@ -1607,12 +1674,15 @@ object FirebaseService {
     @OptIn(ExperimentalCoroutinesApi::class)
     fun getReminders(): Flow<List<Reminder>> {
         val fs = firestore
-        if (fs != null && !useFallback.value && !remindersListenerRegistered) {
+        // Only attach once signed in: Firestore rules reject anonymous reads, and a rejected
+        // listener stops for good. startRealtimeListeners() attaches it after sign-in.
+        if (fs != null && auth?.currentUser != null && !useFallback.value && !remindersListenerRegistered) {
             remindersListenerRegistered = true
             fs.collection("reminders")
                 .addSnapshotListener { snapshot, error ->
                     if (error != null) {
                         Log.w(TAG, "Reminders listener error: ${error.message}")
+                        remindersListenerRegistered = false
                         return@addSnapshotListener
                     }
                     if (snapshot != null) {

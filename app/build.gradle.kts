@@ -63,6 +63,8 @@ android {
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
+  // Never compile a Gemini key into the APK. Gemini is reached through Firebase AI Logic.
+  ignoreList.add("GEMINI_API_KEY")
 }
 
 // Some unused dependencies are commented out below instead of being removed.
