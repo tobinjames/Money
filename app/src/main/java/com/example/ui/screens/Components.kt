@@ -1767,7 +1767,9 @@ fun SearchableCategoryPickerBottomSheet(
         val filtered = categories.filter {
             it.accountClass.equals(targetClass, ignoreCase = true) ||
             it.accountType.equals(targetClass, ignoreCase = true) ||
-            (it.accountClass.isBlank() && it.accountType.isBlank())
+            (it.accountClass.isBlank() && it.accountType.isBlank()) ||
+            // Income can be filed under an expense category as a refund; it then reduces that budget.
+            (targetClass == "INCOME" && it.accountType.equals("EXPENSE", ignoreCase = true))
         }.filter { it.name.isNotBlank() && !it.name.equals("Transfer", ignoreCase = true) }
 
         if (filtered.isNotEmpty()) {
@@ -1844,7 +1846,7 @@ fun SearchableCategoryPickerBottomSheet(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = if (transactionType == TransactionType.INCOME) "Assign an Income ledger stream" else "Categorize this expense for analytics & budgeting",
+                        text = if (transactionType == TransactionType.INCOME) "Pick an income category, or an expense category for a refund" else "Categorize this expense for analytics & budgeting",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

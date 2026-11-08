@@ -80,7 +80,9 @@ object FirebaseService {
     private const val COL_SENDERS = "smsSenders"
     private const val COL_RULES = "merchantRules"
     private const val COL_KEYWORDS = "privacyKeywords"
-    private val ALL_COLLECTIONS = setOf(COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_SENDERS, COL_RULES, COL_KEYWORDS)
+    // The household document itself (names and partner), loaded alongside the collections.
+    private const val HOUSEHOLD_DOC = "household"
+    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_SENDERS, COL_RULES, COL_KEYWORDS)
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var firestore: FirebaseFirestore? = null
@@ -97,7 +99,6 @@ object FirebaseService {
     val spouseUserFirstName = MutableStateFlow<String?>(null)
     val householdName = MutableStateFlow<String?>(null)
     val pendingInvite = MutableStateFlow<HouseholdInvite?>(null)
-    val softBudgetWarnings = MutableStateFlow<List<String>>(emptyList())
 
     private val householdId = MutableStateFlow<String?>(null)
     private var userEmail = ""
@@ -335,7 +336,6 @@ object FirebaseService {
         localBudgets.value = emptyList()
         localMerchantRules.value = emptyList()
         localPrivacyKeywords.value = emptyList()
-        softBudgetWarnings.value = emptyList()
         authStateVal.value = AuthState.UNAUTHENTICATED
     }
 
@@ -376,6 +376,7 @@ object FirebaseService {
             val partner = members.keys.map { it.toString() }.firstOrNull { it != myUid }
             spouseUserUid.value = partner
             spouseUserFirstName.value = partner?.let { (members[it] as? Map<*, *>)?.get("firstName") as? String } ?: null
+            loadedCollections.value = loadedCollections.value + HOUSEHOLD_DOC
         }
 
         listeners = listOf(
@@ -581,17 +582,17 @@ object FirebaseService {
         if (localTransactions.value.none { it.transactionId == ledgerTx.transactionId }) {
             localTransactions.value = localTransactions.value + ledgerTx
         }
-        processBudgetEnforcement(ledgerTx)
         write(COL_TRANSACTIONS, ledgerTx.transactionId, ledgerTx)
+        scheduleBudgetCheck()
     }
 
     suspend fun updateTransaction(transaction: Transaction) {
         val ledgerTx = LedgerRules.toLedger(transaction)
         checkNotInClosedPeriod(ledgerTx)
         upsert(localTransactions, ledgerTx) { it.transactionId == ledgerTx.transactionId }
-        // Confirming a reviewed item, or changing its category or amount, can move a budget.
-        processBudgetEnforcement(ledgerTx)
         write(COL_TRANSACTIONS, ledgerTx.transactionId, ledgerTx, merge = true)
+        // Confirming a reviewed item, or changing its category or amount, can move a budget.
+        scheduleBudgetCheck()
     }
 
     suspend fun deleteTransaction(transactionId: String) {
@@ -635,65 +636,9 @@ object FirebaseService {
         remove(COL_BUDGETS, budgetId)
     }
 
-    /**
-     * Recomputes this month's spend for every budget the expense counts toward, from the
-     * transactions themselves, and alerts once, when this expense pushes a budget over its limit.
-     */
-    private fun processBudgetEnforcement(tx: Transaction) {
-        if (tx.type != TransactionType.EXPENSE || tx.status != TransactionStatus.CONFIRMED || tx.isIgnored) return
-
-        val grouping: (String) -> Pair<String, String> = { category ->
-            val catObj = localAccounts.value.find { it.name.equals(category, ignoreCase = true) || it.id.equals(category, ignoreCase = true) }
-            Pair(catObj?.mainCategory?.trim() ?: "", catObj?.subCategory?.trim() ?: category)
-        }
-        val category = tx.category.trim()
-        val (mainCat, subCat) = grouping(category)
-        val allTx = localTransactions.value.filter { it.transactionId != tx.transactionId } + tx
-
-        localBudgets.value.forEach { budget ->
-            if (!LedgerRules.budgetMatches(budget, category, mainCat, subCat)) return@forEach
-            val newSpent = LedgerRules.monthlySpent(budget, allTx, tx.timestamp, grouping)
-            val previousSpent = newSpent - tx.amount
-            val updated = budget.copy(currentSpent = newSpent)
-            upsert(localBudgets, updated) { it.budgetId == budget.budgetId }
-            write(COL_BUDGETS, budget.budgetId, updated, merge = true)
-
-            if (newSpent > budget.monthlyLimit && previousSpent <= budget.monthlyLimit) {
-                val label = if (budget.subCategory.isNotBlank()) "${budget.mainCategory} › ${budget.subCategory}" else budget.mainCategory.ifBlank { budget.category }
-                if (budget.budgetType == BudgetType.SOFT) {
-                    softBudgetWarnings.value = softBudgetWarnings.value +
-                        "SOFT Limit Warning: $label spent ₹$newSpent exceeds monthly limit ₹${budget.monthlyLimit} (Difference: ₹${newSpent - budget.monthlyLimit})"
-                } else {
-                    appContext?.let { ctx ->
-                        try {
-                            triggerLocalNotification(ctx, label, budget.monthlyLimit, newSpent)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Notification error: ${e.message}")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun triggerLocalNotification(context: Context, category: String, limit: Double, spent: Double) {
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-        val channelId = "budget_alerts_channel"
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            val channel = android.app.NotificationChannel(
-                channelId,
-                "Budget Critical Alerts",
-                android.app.NotificationManager.IMPORTANCE_HIGH
-            ).apply { description = "Notifies when a hard budget limit is crossed" }
-            notificationManager.createNotificationChannel(channel)
-        }
-        val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("🚨 HARD Limit Violation: $category")
-            .setContentText("Total spending (₹$spent) exceeds limit of ₹$limit.")
-            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-        notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
+    /** Budget alerts are worked out by the background check, which both phones run. */
+    private fun scheduleBudgetCheck() {
+        appContext?.let { com.example.reminders.ReminderWorker.checkSoon(it) }
     }
 
     // ---------------------------------------------------------------------------------------

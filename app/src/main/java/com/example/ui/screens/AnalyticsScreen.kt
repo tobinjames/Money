@@ -89,7 +89,6 @@ fun AnalyticsScreen(
     val transactionsState by viewModel.transactions.collectAsState()
     val budgetsState by viewModel.budgets.collectAsState(initial = emptyList())
     val categoriesState by viewModel.categories.collectAsState(initial = emptyList())
-    val softWarningsState by viewModel.softBudgetWarnings.collectAsState(initial = emptyList())
     
     val myNameState by viewModel.currentUserFirstName.collectAsState()
     val spouseNameState by viewModel.spouseUserFirstName.collectAsState()
@@ -137,29 +136,14 @@ fun AnalyticsScreen(
         }.timeInMillis
     }
     
+    // Same calculation as the background budget alerts (ignored items skipped, refunds netted).
     val calculateBudgetSpent = remember(transactionsState, categoriesState, currentMonthStart) {
-        { bgt: Budget ->
-            val monthExpenses = transactionsState.filter {
-                it.status == TransactionStatus.CONFIRMED && it.type == TransactionType.EXPENSE && it.timestamp >= currentMonthStart
-            }
-            monthExpenses.filter { tx ->
-                val txCat = tx.category.trim()
-                val catObj = categoriesState.find { it.name.equals(txCat, ignoreCase = true) || it.id.equals(txCat, ignoreCase = true) }
-                val txMain = catObj?.mainCategory?.trim() ?: ""
-                val txSub = catObj?.subCategory?.trim() ?: txCat
-
-                val matchesSub = bgt.subCategory.isNotBlank() && (bgt.subCategory.equals(txSub, ignoreCase = true) || bgt.subCategory.equals(txCat, ignoreCase = true))
-                val matchesMain = bgt.mainCategory.isNotBlank() && (bgt.mainCategory.equals(txMain, ignoreCase = true) || bgt.mainCategory.equals(txCat, ignoreCase = true)) && bgt.subCategory.isBlank()
-                val matchesLegacy = bgt.category.isNotBlank() && (bgt.category.equals(txCat, ignoreCase = true) || bgt.category.equals(txMain, ignoreCase = true) || bgt.category.equals(txSub, ignoreCase = true))
-
-                matchesSub || matchesMain || matchesLegacy
-            }.sumOf { it.amount }
-        }
+        { bgt: Budget -> com.example.domain.BudgetRules.spent(bgt, transactionsState, categoriesState, System.currentTimeMillis()) }
     }
 
     val dynamicMonthlySpentMap = remember(transactionsState, currentMonthStart) {
         transactionsState
-            .filter { it.status == TransactionStatus.CONFIRMED && it.type == TransactionType.EXPENSE && it.timestamp >= currentMonthStart }
+            .filter { it.status == TransactionStatus.CONFIRMED && !it.isIgnored && it.type == TransactionType.EXPENSE && it.timestamp >= currentMonthStart }
             .groupBy { it.category }
             .mapValues { entry -> entry.value.sumOf { it.amount } }
     }
@@ -1447,8 +1431,8 @@ fun AnalyticsScreen(
             
             // Overall Budgets Health Summary Card
             item {
-                val totalBudgeted = budgetsState.sumOf { it.monthlyLimit }
-                val totalSpent = budgetsState.sumOf { calculateBudgetSpent(it) }
+                // The family budget when there is one, otherwise the category budgets added up.
+                val (totalBudgeted, totalSpent) = com.example.domain.BudgetRules.familyTotals(budgetsState) { calculateBudgetSpent(it) }
                 val overallProgress = if (totalBudgeted > 0.0) (totalSpent / totalBudgeted).toFloat().coerceIn(0f, 1f) else 0f
                 val activeCount = budgetsState.size
                 val violatedCount = budgetsState.count { calculateBudgetSpent(it) > it.monthlyLimit }
@@ -1555,56 +1539,13 @@ fun AnalyticsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             val remaining = totalBudgeted - totalSpent
+                            val familyPerDay = com.example.domain.BudgetRules.safePerDay(totalBudgeted, totalSpent, System.currentTimeMillis())
                             Text(
-                                text = if (remaining >= 0) "Buffer Left: ${formatAmount(remaining)}" else "Over Limit: ${formatAmount(-remaining)}",
+                                text = if (remaining >= 0) "Left: ${formatAmount(remaining)} · ${formatAmount(familyPerDay ?: 0.0)}/day" else "Over Limit: ${formatAmount(-remaining)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (remaining >= 0) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
                             )
-                        }
-                    }
-                }
-            }
-
-            // Soft warnings alert block (if any warning triggers exist)
-            if (softWarningsState.isNotEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f)
-                        ),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Warning,
-                                    contentDescription = "Warning icon",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                                Text(
-                                    text = "Soft Budget Limit Warnings",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            softWarningsState.forEach { warning ->
-                                Text(
-                                    text = "• $warning",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                    modifier = Modifier.padding(vertical = 2.dp)
-                                )
-                            }
                         }
                     }
                 }
@@ -1681,12 +1622,9 @@ fun AnalyticsScreen(
                     val progress = if (bgt.monthlyLimit > 0.0) (spent / bgt.monthlyLimit).toFloat().coerceIn(0f, 1f) else 0f
                     
                     val iconCategory = bgt.subCategory.ifBlank { bgt.mainCategory.ifBlank { bgt.category } }
-                    val displayName = when {
-                        bgt.subCategory.isNotBlank() -> bgt.subCategory
-                        bgt.mainCategory.isNotBlank() -> bgt.mainCategory
-                        else -> bgt.category
-                    }
+                    val displayName = com.example.domain.BudgetRules.label(bgt)
                     val scopeTag = when {
+                        bgt.isOverall -> "All spending"
                         bgt.subCategory.isNotBlank() && bgt.mainCategory.isNotBlank() -> bgt.mainCategory
                         bgt.subCategory.isBlank() && bgt.mainCategory.isNotBlank() -> "All ${bgt.mainCategory}"
                         else -> "Budget"
@@ -1760,24 +1698,6 @@ fun AnalyticsScreen(
                                                 )
                                             }
 
-                                            // Budget Type Badge (SOFT / HARD)
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(4.dp))
-                                                    .background(
-                                                        if (bgt.budgetType == BudgetType.HARD) MaterialTheme.colorScheme.errorContainer
-                                                        else MaterialTheme.colorScheme.secondaryContainer
-                                                    )
-                                                    .padding(horizontal = 5.dp, vertical = 2.dp)
-                                            ) {
-                                                Text(
-                                                    text = bgt.budgetType.name + " ENFORCEMENT",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = if (bgt.budgetType == BudgetType.HARD) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer,
-                                                    fontSize = 8.sp,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            }
                                         }
                                     }
                                 }
@@ -1844,8 +1764,10 @@ fun AnalyticsScreen(
                                 )
                                 
                                 val diff = bgt.monthlyLimit - spent
+                                // "Safe to spend": what's left spread over the rest of the month.
+                                val perDay = com.example.domain.BudgetRules.safePerDay(bgt.monthlyLimit, spent, System.currentTimeMillis())
                                 Text(
-                                    text = if (diff >= 0) "Left: ${formatAmount(diff)}" else "Overspent: ${formatAmount(-diff)}",
+                                    text = if (diff >= 0) "${formatAmount(perDay ?: 0.0)}/day left" else "Over by ${formatAmount(-diff)}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = if (diff >= 0) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
@@ -2129,7 +2051,7 @@ fun AnalyticsScreen(
         var budgetScope by remember { mutableStateOf(0) } // 0 = Sub-Category, 1 = Entire Main Category
         var showCategoryPicker by remember { mutableStateOf(false) }
         var limitStr by remember { mutableStateOf("") }
-        var isHardLimit by remember { mutableStateOf(false) }
+        val hasOverall = budgetsState.any { it.isOverall }
         
         val activeCategoryDisplay = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
 
@@ -2153,20 +2075,22 @@ fun AnalyticsScreen(
                         val limitVal = limitStr.toDoubleOrNull() ?: 0.0
                         val finalCategory = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
                         val finalSub = if (budgetScope == 1) "" else selectedSubCategory
-                        if (finalCategory.isNotBlank() && limitVal > 0.0) {
+                        if (budgetScope == 2 && limitVal > 0.0 && !hasOverall) {
+                            viewModel.addBudget(Budget(category = "All spending", monthlyLimit = limitVal, isOverall = true))
+                            showAddBudgetDialog = false
+                        } else if (budgetScope != 2 && finalCategory.isNotBlank() && limitVal > 0.0) {
                             viewModel.addBudget(
                                 Budget(
                                     category = finalCategory,
                                     mainCategory = selectedMainCategory,
                                     subCategory = finalSub,
-                                    monthlyLimit = limitVal,
-                                    budgetType = if (isHardLimit) BudgetType.HARD else BudgetType.SOFT
+                                    monthlyLimit = limitVal
                                 )
                             )
                             showAddBudgetDialog = false
                         }
                     },
-                    enabled = (limitStr.toDoubleOrNull() ?: 0.0) > 0.0
+                    enabled = (limitStr.toDoubleOrNull() ?: 0.0) > 0.0 && !(budgetScope == 2 && hasOverall)
                 ) {
                     Text("Save Budget")
                 }
@@ -2240,14 +2164,44 @@ fun AnalyticsScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                    CategoryPickerField(
-                        label = if (budgetScope == 0) "Category & Sub-Category" else "Main Category",
-                        selectedCategory = activeCategoryDisplay,
-                        onClick = { showCategoryPicker = true },
+                    // Whole-family budget: everything the household spends, across categories.
+                    Surface(
+                        onClick = { budgetScope = 2 },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (budgetScope == 2) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, if (budgetScope == 2) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
                         modifier = Modifier.fillMaxWidth()
-                    )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Whole family",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = if (budgetScope == 2) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (hasOverall) "You already have a family budget; edit it instead" else "All spending, every category",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    if (budgetScope != 2) {
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        CategoryPickerField(
+                            label = if (budgetScope == 0) "Category & Sub-Category" else "Main Category",
+                            selectedCategory = activeCategoryDisplay,
+                            onClick = { showCategoryPicker = true },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(10.dp))
 
@@ -2264,21 +2218,11 @@ fun AnalyticsScreen(
                     )
                     
                     Spacer(modifier = Modifier.height(12.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Hard Enforcement", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            Text("Alerts immediately when approaching/exceeding threshold", style = MaterialTheme.typography.bodySmall, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = isHardLimit,
-                            onCheckedChange = { isHardLimit = it }
-                        )
-                    }
+                    Text(
+                        text = "You'll both be alerted at 80% of the limit and again if it goes over.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         )
@@ -2311,7 +2255,6 @@ fun AnalyticsScreen(
         }
         var showCategoryPicker by remember { mutableStateOf(false) }
         var limitStr by remember(currentBudget.budgetId) { mutableStateOf(currentBudget.monthlyLimit.toString()) }
-        var isHardLimit by remember(currentBudget.budgetId) { mutableStateOf(currentBudget.budgetType == BudgetType.HARD) }
         
         val activeCategoryDisplay = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
 
@@ -2335,14 +2278,16 @@ fun AnalyticsScreen(
                         val limitVal = limitStr.toDoubleOrNull() ?: 0.0
                         val finalCategory = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
                         val finalSub = if (budgetScope == 1) "" else selectedSubCategory
-                        if (finalCategory.isNotBlank() && limitVal > 0.0) {
+                        if (currentBudget.isOverall && limitVal > 0.0) {
+                            viewModel.updateBudget(currentBudget.copy(monthlyLimit = limitVal))
+                            showEditBudgetDialog = null
+                        } else if (finalCategory.isNotBlank() && limitVal > 0.0) {
                             viewModel.updateBudget(
                                 currentBudget.copy(
                                     category = finalCategory,
                                     mainCategory = selectedMainCategory,
                                     subCategory = finalSub,
-                                    monthlyLimit = limitVal,
-                                    budgetType = if (isHardLimit) BudgetType.HARD else BudgetType.SOFT
+                                    monthlyLimit = limitVal
                                 )
                             )
                             showEditBudgetDialog = null
@@ -2360,76 +2305,80 @@ fun AnalyticsScreen(
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Budget Target Level",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Surface(
-                            onClick = { budgetScope = 0 },
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (budgetScope == 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = BorderStroke(1.dp, if (budgetScope == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
-                            modifier = Modifier.weight(1f)
+                    if (currentBudget.isOverall) {
+                        Text("Family budget: all spending, every category", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text(
+                            text = "Budget Target Level",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Column(
-                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                            Surface(
+                                onClick = { budgetScope = 0 },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (budgetScope == 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, if (budgetScope == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Text(
-                                    text = "Sub-Category",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = if (budgetScope == 0) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "e.g. Groceries",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "Sub-Category",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (budgetScope == 0) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "e.g. Groceries",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                onClick = { budgetScope = 1 },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (budgetScope == 1) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, if (budgetScope == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "Main Category",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (budgetScope == 1) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "e.g. All Food & Dining",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
 
-                        Surface(
-                            onClick = { budgetScope = 1 },
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (budgetScope == 1) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = BorderStroke(1.dp, if (budgetScope == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = "Main Category",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = if (budgetScope == 1) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = "e.g. All Food & Dining",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        CategoryPickerField(
+                            label = if (budgetScope == 0) "Category & Sub-Category" else "Main Category",
+                            selectedCategory = activeCategoryDisplay,
+                            onClick = { showCategoryPicker = true },
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    CategoryPickerField(
-                        label = if (budgetScope == 0) "Category & Sub-Category" else "Main Category",
-                        selectedCategory = activeCategoryDisplay,
-                        onClick = { showCategoryPicker = true },
-                        modifier = Modifier.fillMaxWidth()
-                    )
 
                     Spacer(modifier = Modifier.height(10.dp))
 
@@ -2445,21 +2394,11 @@ fun AnalyticsScreen(
                     )
                     
                     Spacer(modifier = Modifier.height(12.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Hard Enforcement", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            Text("Alerts immediately when approaching/exceeding threshold", style = MaterialTheme.typography.bodySmall, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = isHardLimit,
-                            onCheckedChange = { isHardLimit = it }
-                        )
-                    }
+                    Text(
+                        text = "You'll both be alerted at 80% of the limit and again if it goes over.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         )

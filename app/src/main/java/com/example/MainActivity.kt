@@ -45,8 +45,8 @@ class MainActivity : ComponentActivity() {
         // Initialize Firebase service (supports remote Sync or automatic dynamic local fallback)
         FirebaseService.initialize(applicationContext)
 
-        // Trigger reminders scanning, 15-day scheduling, and notifications cycle
-        viewModel.runRemindersCheck(applicationContext)
+        // Reminder checks and alerts run in the background (daily, and now).
+        com.example.reminders.ReminderWorker.schedule(applicationContext)
 
         // Load the user's preference for automatic SMS scanning
         viewModel.loadSmsAutoSyncSetting(applicationContext)
@@ -64,6 +64,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val authState by com.example.data.FirebaseService.authStateVal.collectAsState()
+                LaunchedEffect(authState) {
+                    // Run the reminder check as soon as the household is open after sign-in.
+                    if (authState == com.example.data.AuthState.AUTHORIZED) {
+                        com.example.reminders.ReminderWorker.schedule(applicationContext)
+                    }
+                }
                 var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
                 var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules", or "settlement"
 
