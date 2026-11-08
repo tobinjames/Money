@@ -12,7 +12,6 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
-import com.google.firebase.auth.UserProfileChangeRequest
 import com.google.firebase.firestore.CollectionReference
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -33,9 +32,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Calendar
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-
-// Thrown when an email/password user must open the verification link before signing in.
-class EmailVerificationRequiredException(message: String) : Exception(message)
 
 /** An invitation to join someone's household, keyed by the invitee's email. */
 data class HouseholdInvite(val householdId: String, val householdName: String, val invitedByName: String) {
@@ -167,7 +163,7 @@ object FirebaseService {
     fun getCurrentUserDisplayName(): String = auth?.currentUser?.displayName ?: userName
     fun getCurrentUserId(): String = auth?.currentUser?.uid ?: currentUserUid.value ?: "user_default"
 
-    // Firestore rules require a verified email. Google accounts are always verified.
+    // Sign-in is Google only. Firestore rules also require a verified email, which Google accounts have.
     private fun isEmailVerified(user: FirebaseUser): Boolean =
         user.isEmailVerified || user.providerData.any { it.providerId == GoogleAuthProvider.PROVIDER_ID }
 
@@ -177,37 +173,6 @@ object FirebaseService {
         val user = fbAuth.signInWithCredential(GoogleAuthProvider.getCredential(idToken, null)).awaitTask().user
             ?: throw Exception("Google sign-in succeeded but no Firebase user was returned.")
         completeSignIn(user)
-    }
-
-    suspend fun signInWithEmail(email: String, password: String): String {
-        val fbAuth = auth ?: throw Exception("Cannot connect to server: Firebase Authentication is unavailable.")
-        val user = fbAuth.signInWithEmailAndPassword(email, password).awaitTask().user
-            ?: throw Exception("Login succeeded but user is null")
-        if (!isEmailVerified(user)) {
-            try {
-                user.sendEmailVerification().awaitTask()
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not send verification email: ${e.message}")
-            }
-            logout()
-            throw EmailVerificationRequiredException("Please verify your email address first. We've sent a verification link to ${user.email ?: email}; open it, then sign in again.")
-        }
-        completeSignIn(user)
-        return user.uid
-    }
-
-    suspend fun signUpWithEmail(email: String, password: String, displayName: String): String {
-        val fbAuth = auth ?: throw Exception("Cannot connect to server: Firebase Authentication is unavailable.")
-        val user = fbAuth.createUserWithEmailAndPassword(email, password).awaitTask().user
-            ?: throw Exception("Sign up returned success but user is null")
-        try {
-            user.updateProfile(UserProfileChangeRequest.Builder().setDisplayName(displayName).build()).awaitTask()
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not set display name: ${e.message}")
-        }
-        user.sendEmailVerification().awaitTask()
-        logout()
-        throw EmailVerificationRequiredException("Account created. We've sent a verification link to $email; open it, then sign in.")
     }
 
     /**
