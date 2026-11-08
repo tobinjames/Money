@@ -182,13 +182,6 @@ data class WhitelistedSender(
     val name: String = ""
 )
 
-data class ManualMapping(
-    val id: String = UUID.randomUUID().toString(),
-    val senderId: String = "", // e.g. "HDFC"
-    val cardDigits: String = "", // Last 4 digits of card/account
-    val accountId: String = "" // Custom Mapped Account Name or ID
-)
-
 enum class BudgetType {
     SOFT,
     HARD

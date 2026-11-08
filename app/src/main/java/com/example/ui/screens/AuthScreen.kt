@@ -68,7 +68,7 @@ fun AuthScreen(
             val account = task.getResult(ApiException::class.java)
             val idToken = account?.idToken
             if (account != null && idToken.isNullOrBlank()) {
-                authErrorMessage = "Google Sign-In: no ID token returned. Check GOOGLE_WEB_CLIENT_ID and the app's SHA-1 in Firebase."
+                authErrorMessage = "Google Sign-In: no ID token returned. Check the app's SHA-1 fingerprint in Firebase project settings."
             } else if (account != null && idToken != null) {
                 authLoading = true
                 authErrorMessage = null
@@ -192,7 +192,7 @@ fun AuthScreen(
                                 Spacer(modifier = Modifier.height(16.dp))
 
                                 Text(
-                                    text = "Access Denied",
+                                    text = "Sign-in failed",
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.error
@@ -201,7 +201,7 @@ fun AuthScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
 
                                 Text(
-                                    text = authErrorMessage ?: "Your email is not whitelisted by the family administrator. Please contact your household owner to grant email access.",
+                                    text = authErrorMessage ?: "Sign-in did not complete. Check your connection and try again.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                     textAlign = TextAlign.Center
@@ -306,9 +306,14 @@ fun AuthScreen(
                                     onClick = {
                                         authErrorMessage = null
                                         try {
+                                            // google-services.json generates default_web_client_id once Google sign-in is enabled
+                                            // in Firebase; GOOGLE_WEB_CLIENT_ID in .env is only an override.
+                                            val generatedId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+                                                .takeIf { it != 0 }?.let { context.getString(it) }
                                             val webClientId = BuildConfig.GOOGLE_WEB_CLIENT_ID
+                                                .takeIf { it.isNotBlank() && it != "YOUR_WEB_CLIENT_ID" } ?: generatedId ?: ""
                                             if (webClientId.isBlank() || webClientId == "YOUR_WEB_CLIENT_ID") {
-                                                authErrorMessage = "Google Sign-In is not configured: set GOOGLE_WEB_CLIENT_ID in .env (Firebase console > Authentication > Google > Web client ID)."
+                                                authErrorMessage = "Google Sign-In is not configured: enable Google in Firebase Authentication, then download google-services.json into app/ again."
                                                 return@Button
                                             }
                                             val googleSignInOptions = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
