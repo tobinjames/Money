@@ -60,6 +60,7 @@ import android.widget.Toast
 fun DashboardScreen(
     viewModel: ExpenseViewModel,
     onNavigateTransactions: () -> Unit,
+    onOpenReserves: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -525,6 +526,11 @@ fun DashboardScreen(
                     }
                 }
             }
+        }
+
+        // FREE TO SPEND: personal, until the next salary
+        item {
+            FreeToSpendCard(viewModel = viewModel, onOpenReserves = onOpenReserves)
         }
 
         // ACCOUNT SUMMARY METRICS: Net Liquid Assets & Liabilities

@@ -57,6 +57,7 @@ fun SettingsScreen(
     viewModel: ExpenseViewModel,
     onNavigateCategoryManagement: () -> Unit,
     onNavigateSmartRules: () -> Unit,
+    onNavigateReserves: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -129,8 +130,17 @@ fun SettingsScreen(
                             subtitle = "Banks, cards, loans, income and expense categories",
                             onClick = onNavigateCategoryManagement
                         )
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Savings,
+                            iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            title = "Reserves",
+                            subtitle = "Money set aside for what's coming, shared with your partner",
+                            onClick = onNavigateReserves
+                        )
                     }
                 }
+                item { FreeToSpendSettingsCard(viewModel) }
 
                 item { SectionLabel("Notifications") }
                 item {
@@ -817,6 +827,55 @@ private fun ToggleRow(
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/** Free to spend settings for this phone: they are personal, like the figure. */
+@Composable
+private fun FreeToSpendSettingsCard(viewModel: ExpenseViewModel) {
+    val context = LocalContext.current
+    val salaryDay by viewModel.salaryDay.collectAsState()
+    val threshold by viewModel.lowBalanceThreshold.collectAsState()
+    var lowAlerts by remember { mutableStateOf(AlertPrefs.lowBalanceAlerts(context)) }
+    var thresholdText by remember(threshold) { mutableStateOf("%.0f".format(threshold)) }
+    var dayMenu by remember { mutableStateOf(false) }
+
+    SettingsCard {
+        Text("Free to spend", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(
+            "Bills due before your next salary are taken off what you can spend. Without a salary day, the next 30 days are used.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+        Box(Modifier.padding(top = 8.dp)) {
+            OutlinedButton(onClick = { dayMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (salaryDay in 1..31) "Salary arrives on day $salaryDay of the month" else "Set your salary day")
+            }
+            DropdownMenu(expanded = dayMenu, onDismissRequest = { dayMenu = false }) {
+                DropdownMenuItem(text = { Text("Not set (next 30 days)") }, onClick = { viewModel.setSalaryDay(context, 0); dayMenu = false })
+                (1..31).forEach { d ->
+                    DropdownMenuItem(text = { Text("Day $d") }, onClick = { viewModel.setSalaryDay(context, d); dayMenu = false })
+                }
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+        ToggleRow(null, "Low balance alert", "When Free to spend drops below the amount below", lowAlerts) {
+            lowAlerts = it; AlertPrefs.setLowBalanceAlerts(context, it)
+        }
+        if (lowAlerts) {
+            OutlinedTextField(
+                value = thresholdText,
+                onValueChange = { v ->
+                    thresholdText = v.filter { it.isDigit() }
+                    thresholdText.toDoubleOrNull()?.let { viewModel.setLowBalanceThreshold(context, it) }
+                },
+                label = { Text("Alert below (₹)") },
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+            )
+        }
     }
 }
 

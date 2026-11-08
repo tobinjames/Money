@@ -62,6 +62,7 @@ enum class AuthState {
  *   households/{householdId}/transactions
  *   households/{householdId}/budgets
  *   households/{householdId}/reminders
+ *   households/{householdId}/reserves     -> money set aside, shared by the household
  *   households/{householdId}/smsSenders
  *   households/{householdId}/merchantRules
  *   households/{householdId}/privacyKeywords
@@ -77,12 +78,13 @@ object FirebaseService {
     private const val COL_TRANSACTIONS = "transactions"
     private const val COL_BUDGETS = "budgets"
     private const val COL_REMINDERS = "reminders"
+    private const val COL_RESERVES = "reserves"
     private const val COL_SENDERS = "smsSenders"
     private const val COL_RULES = "merchantRules"
     private const val COL_KEYWORDS = "privacyKeywords"
     // The household document itself (names and partner), loaded alongside the collections.
     private const val HOUSEHOLD_DOC = "household"
-    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_SENDERS, COL_RULES, COL_KEYWORDS)
+    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_RESERVES, COL_SENDERS, COL_RULES, COL_KEYWORDS)
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var firestore: FirebaseFirestore? = null
@@ -110,6 +112,7 @@ object FirebaseService {
     private val localAccounts = MutableStateFlow<List<Account>>(emptyList())
     private val localTransactions = MutableStateFlow<List<Transaction>>(emptyList())
     private val localReminders = MutableStateFlow<List<Reminder>>(emptyList())
+    private val localReserves = MutableStateFlow<List<Reserve>>(emptyList())
     private val localSenders = MutableStateFlow<List<WhitelistedSender>>(emptyList())
     private val localBudgets = MutableStateFlow<List<Budget>>(emptyList())
     private val localMerchantRules = MutableStateFlow<List<MerchantRule>>(emptyList())
@@ -343,6 +346,7 @@ object FirebaseService {
         localAccounts.value = emptyList()
         localTransactions.value = emptyList()
         localReminders.value = emptyList()
+        localReserves.value = emptyList()
         localSenders.value = emptyList()
         localBudgets.value = emptyList()
         localMerchantRules.value = emptyList()
@@ -399,6 +403,7 @@ object FirebaseService {
             listen(COL_TRANSACTIONS, Transaction::class.java, localTransactions),
             listen(COL_BUDGETS, Budget::class.java, localBudgets),
             listen(COL_REMINDERS, Reminder::class.java, localReminders),
+            listen(COL_RESERVES, Reserve::class.java, localReserves),
             listen(COL_SENDERS, WhitelistedSender::class.java, localSenders),
             listen(COL_RULES, MerchantRule::class.java, localMerchantRules),
             listen(COL_KEYWORDS, PrivacyKeyword::class.java, localPrivacyKeywords)
@@ -666,6 +671,22 @@ object FirebaseService {
     suspend fun deleteReminder(reminderId: String) {
         localReminders.value = localReminders.value.filter { it.id != reminderId }
         remove(COL_REMINDERS, reminderId)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Reserves (shared by the household)
+    // ---------------------------------------------------------------------------------------
+
+    fun getReserves(): Flow<List<Reserve>> = localReserves
+
+    suspend fun saveReserve(reserve: Reserve) {
+        upsert(localReserves, reserve) { it.id == reserve.id }
+        write(COL_RESERVES, reserve.id, reserve)
+    }
+
+    suspend fun deleteReserve(id: String) {
+        localReserves.value = localReserves.value.filter { it.id != id }
+        remove(COL_RESERVES, id)
     }
 
     // ---------------------------------------------------------------------------------------

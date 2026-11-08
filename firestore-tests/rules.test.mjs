@@ -40,6 +40,9 @@ await t('stranger cannot read other household tx', assertFails(getDocs(collectio
 await t('stranger cannot write other household tx', assertFails(setDoc(tx(stranger, 'h1', 'evil'), { amount: 1 })));
 await t('member cannot read other household', assertFails(getDoc(tx(owner, 'h2', 'x1'))));
 await t('anon denied', assertFails(getDocs(collection(anon, 'households', 'h1', 'transactions'))));
+await t('member adds a shared reserve', assertSucceeds(setDoc(doc(owner, 'households', 'h1', 'reserves', 'r1'), { name: 'Insurance', amount: 12000 })));
+await t('member reads shared reserves', assertSucceeds(getDocs(collection(owner, 'households', 'h1', 'reserves'))));
+await t('stranger cannot read reserves', assertFails(getDocs(collection(stranger, 'households', 'h1', 'reserves'))));
 await t('unknown subcollection denied', assertFails(getDoc(doc(owner, 'households', 'h1', 'GeminiInteractionLogs', 'g1'))));
 await t('unknown top-level collection denied', assertFails(getDoc(doc(owner, 'Transactions', 't1'))));
 

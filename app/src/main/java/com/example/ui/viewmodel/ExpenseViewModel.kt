@@ -48,6 +48,7 @@ class ExpenseViewModel : ViewModel() {
     val budgets = FirebaseService.getBudgets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val reserves = FirebaseService.getReserves()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _toastEvent = MutableSharedFlow<String>()
@@ -235,6 +236,69 @@ class ExpenseViewModel : ViewModel() {
             familyNetWorth = familyNetWorthVal
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NetFinancials())
+
+    // ---------------------------------------------------------------------------------------
+    // Free to spend (personal) and reserves (shared)
+    // ---------------------------------------------------------------------------------------
+
+    /** Day of the month this person's salary arrives, 0 when not set. Kept on this phone. */
+    val salaryDay = MutableStateFlow(0)
+    val lowBalanceThreshold = MutableStateFlow(0.0)
+
+    fun loadMoneyPrefs(context: Context) {
+        salaryDay.value = com.example.reminders.AlertPrefs.salaryDay(context)
+        lowBalanceThreshold.value = com.example.reminders.AlertPrefs.lowBalanceThreshold(context)
+    }
+
+    fun setSalaryDay(context: Context, day: Int) {
+        com.example.reminders.AlertPrefs.setSalaryDay(context, day)
+        salaryDay.value = day
+    }
+
+    fun setLowBalanceThreshold(context: Context, amount: Double) {
+        com.example.reminders.AlertPrefs.setLowBalanceThreshold(context, amount)
+        lowBalanceThreshold.value = amount
+    }
+
+    private val freeToSpendInputs = combine(accounts, transactions, reminders, reserves) { a, t, r, s -> listOf(a, t, r, s) }
+
+    val freeToSpend: StateFlow<com.example.domain.FreeToSpendRules.Breakdown?> =
+        combine(freeToSpendInputs, salaryDay, currentUserUid) { inputs, day, uid ->
+            if (uid == null) return@combine null
+            @Suppress("UNCHECKED_CAST")
+            com.example.domain.FreeToSpendRules.compute(
+                myUid = uid,
+                accounts = inputs[0] as List<Account>,
+                txs = inputs[1] as List<Transaction>,
+                reminders = inputs[2] as List<Reminder>,
+                reserves = inputs[3] as List<Reserve>,
+                salaryDay = day,
+                now = System.currentTimeMillis()
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** New reserves start counting monthly top-ups from next month; the opening amount is this month's. */
+    fun saveReserve(reserve: Reserve) {
+        viewModelScope.launch {
+            val isNew = reserves.value.none { it.id == reserve.id }
+            val toSave = if (isNew) reserve.copy(
+                createdByUserId = FirebaseService.getCurrentUserId(),
+                lastContributionMonth = com.example.domain.FreeToSpendRules.monthKey(System.currentTimeMillis())
+            ) else reserve
+            FirebaseService.saveReserve(toSave)
+        }
+    }
+
+    /** Money taken out of a reserve once it is spent on what it was for. */
+    fun useReserve(reserve: Reserve, amount: Double) {
+        viewModelScope.launch {
+            FirebaseService.saveReserve(reserve.copy(amount = (reserve.amount - amount).coerceAtLeast(0.0)))
+        }
+    }
+
+    fun deleteReserve(id: String) {
+        viewModelScope.launch { FirebaseService.deleteReserve(id) }
+    }
 
     // Auto-category helpers
     fun getSuggestedCategoryForVendor(vendorName: String): String? {

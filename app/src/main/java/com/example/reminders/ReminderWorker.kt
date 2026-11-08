@@ -18,6 +18,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.Constraints
 import com.example.data.FirebaseService
+import com.example.domain.FreeToSpendRules
 import com.example.domain.ReminderRules
 import kotlinx.coroutines.flow.first
 import java.util.Calendar
@@ -26,7 +27,7 @@ import java.util.concurrent.TimeUnit
 /**
  * The background check, run on both phones every few hours, when the app opens, and shortly
  * after a transaction is saved: rolls paid recurring reminders forward, creates and settles
- * credit card bills, and sends due-date and budget alerts. Works without the app being open.
+ * credit card bills, tops up reserves, and sends due-date, budget and low Free to spend alerts. Works without the app being open.
  * Alerts wait out the quiet hours set in Settings (10 PM to 7 AM by default).
  */
 class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -56,6 +57,9 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val BUDGET_CHANNEL = "budget_alerts_channel"
         private const val BUDGET_PREFS = "budget_alert_stages"
         private const val SOON = "budget_check_soon"
+
+        private const val MONEY_CHANNEL = "free_to_spend_channel"
+        private const val LOW_SENT = "low_balance_alert_sent"
 
         /** A check every 6 hours from about 9 AM, plus one right away. Safe to call on every app start. */
         fun schedule(context: Context) {
@@ -123,12 +127,44 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 }
             }
 
-            // 3. Alerts, from the updated list. Stages not yet sent are picked up after quiet hours.
+            // 3. Reserves: this month's automatic top-ups (the same result on both phones).
+            var reserves = FirebaseService.getReserves().first()
+            reserves.forEach { r -> FreeToSpendRules.topUp(r, now)?.let { FirebaseService.saveReserve(it) } }
+
+            // 4. Alerts, from the updated lists. Stages not yet sent are picked up after quiet hours.
             AlertPrefs.setLastCheck(context, now)
             if (isQuietHours(context, now)) return
             reminders = FirebaseService.getReminders().first()
             if (AlertPrefs.reminderAlerts(context)) notify(context, reminders, accounts, now)
             if (AlertPrefs.budgetAlerts(context)) notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
+            if (AlertPrefs.lowBalanceAlerts(context)) {
+                reserves = FirebaseService.getReserves().first()
+                val breakdown = FreeToSpendRules.compute(
+                    FirebaseService.getCurrentUserId(), accounts, txs, reminders, reserves, AlertPrefs.salaryDay(context), now
+                )
+                notifyLowBalance(context, breakdown)
+            }
+        }
+
+        /** Once each time Free to spend drops below the threshold; again only after it recovers. */
+        private fun notifyLowBalance(context: Context, b: FreeToSpendRules.Breakdown) {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val threshold = AlertPrefs.lowBalanceThreshold(context)
+            if (b.freeToSpend >= threshold) {
+                prefs.edit().putBoolean(LOW_SENT, false).apply()
+                return
+            }
+            if (prefs.getBoolean(LOW_SENT, false) || !canNotify(context)) return
+            prefs.edit().putBoolean(LOW_SENT, true).apply()
+            val (title, text) = if (b.freeToSpend < 0) {
+                "🚨 You're ₹%,.0f short".format(-b.freeToSpend) to
+                    "Card dues (₹%,.0f), bills before salary (₹%,.0f) and reserves (₹%,.0f) add up to more than your bank and cash (₹%,.0f)."
+                        .format(b.cardDues, b.upcomingBills, b.reserved, b.bankAndCash)
+            } else {
+                "⚠️ Only ₹%,.0f free to spend".format(b.freeToSpend) to
+                    "That's after card dues of ₹%,.0f, bills before salary and reserves.".format(b.cardDues)
+            }
+            post(context, MONEY_CHANNEL, "Free to spend", LOW_SENT.hashCode(), title, text)
         }
 
         /** 80% and over-limit alerts, once per budget per month, on every member's phone. */

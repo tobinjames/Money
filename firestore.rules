@@ -8,7 +8,7 @@ rules_version = '2';
 //
 //   users/{uid}                 - own profile (which household you belong to)
 //   households/{hid}            - name, ownerUid, memberUids, members
-//   households/{hid}/{coll}/*   - accounts, transactions, budgets, reminders,
+//   households/{hid}/{coll}/*   - accounts, transactions, budgets, reminders, reserves,
 //                                 smsSenders, merchantRules, privacyKeywords
 //   invites/{email}             - lets a member invite a partner by email
 //
@@ -77,7 +77,7 @@ service cloud.firestore {
 
       match /{coll}/{docId} {
         allow read, write: if isMember(hid)
-          && coll in ['accounts', 'transactions', 'budgets', 'reminders',
+          && coll in ['accounts', 'transactions', 'budgets', 'reminders', 'reserves',
                       'smsSenders', 'merchantRules', 'privacyKeywords'];
       }
     }

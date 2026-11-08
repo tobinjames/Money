@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
 
         // Load the user's preference for automatic SMS scanning
         viewModel.loadSmsAutoSyncSetting(applicationContext)
+        viewModel.loadMoneyPrefs(applicationContext)
 
         // Request SMS permissions natively for maximum security on startup
         requestSmsPermissions()
@@ -71,7 +72,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
-                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories" or "rules"
+                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules" or "reserves"
 
                 if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
                     HouseholdSetupScreen()
@@ -79,6 +80,11 @@ class MainActivity : ComponentActivity() {
                     AuthScreen(viewModel = viewModel)
                 } else if (activeSubPage == "categories") {
                     CategoryManagementScreen(
+                        viewModel = viewModel,
+                        onBackClick = { activeSubPage = null }
+                    )
+                } else if (activeSubPage == "reserves") {
+                    ReservesScreen(
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
@@ -137,6 +143,7 @@ class MainActivity : ComponentActivity() {
                                     DashboardScreen(
                                         viewModel = viewModel,
                                         onNavigateTransactions = { selectedTab = ScreenTab.Transactions },
+                                        onOpenReserves = { activeSubPage = "reserves" },
                                         modifier = contentModifier
                                     )
                                 }
@@ -163,6 +170,7 @@ class MainActivity : ComponentActivity() {
                                         viewModel = viewModel,
                                         onNavigateCategoryManagement = { activeSubPage = "categories" },
                                         onNavigateSmartRules = { activeSubPage = "rules" },
+                                        onNavigateReserves = { activeSubPage = "reserves" },
                                         modifier = contentModifier
                                     )
                                 }
