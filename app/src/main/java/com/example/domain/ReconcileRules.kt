@@ -5,28 +5,35 @@ import java.util.Calendar
 
 /**
  * Every bank account, cash wallet and credit card should be checked against its real balance
- * (reconciled) at least once a month. Reminders go out at the weekend, when there is time to
+ * (reconciled) at least once a month; FDs, mutual funds and loans every two months. Reminders go out at the weekend, when there is time to
  * do it: Friday evening, Saturday and Sunday.
  */
 object ReconcileRules {
     const val STALE_DAYS = 30
 
+    /** FDs, mutual funds and loans move slowly, so every two months is enough. */
+    const val SLOW_STALE_DAYS = 60
+
     /** Friday from this hour counts as the weekend. */
     const val FRIDAY_FROM_HOUR = 18
 
     fun isReconcilable(account: Account): Boolean =
-        FreeToSpendRules.isLiquid(account) || FreeToSpendRules.isCard(account)
+        account.accountType == "ASSET" || account.accountType == "LIABILITY"
+
+    /** How long an account can go between reconciliations. */
+    fun staleAfterDays(account: Account): Int =
+        if (FreeToSpendRules.isLiquid(account) || FreeToSpendRules.isCard(account)) STALE_DAYS else SLOW_STALE_DAYS
 
     /** When the account was last reconciled, or created when it never has been. */
     fun lastChecked(account: Account): Long = account.lastReconciledDate ?: account.asOfDate
 
     fun daysSince(account: Account, now: Long): Int = ((now - lastChecked(account)) / ReminderRules.DAY_MS).toInt()
 
-    /** This person's (and joint) accounts not reconciled for [STALE_DAYS] days, oldest first. */
+    /** This person's (and joint) accounts overdue for reconciling, oldest first. */
     fun stale(myUid: String, accounts: List<Account>, now: Long): List<Account> =
         accounts
             .filter { isReconcilable(it) && FreeToSpendRules.countsFor(it.ownerUserId, myUid) }
-            .filter { daysSince(it, now) >= STALE_DAYS }
+            .filter { daysSince(it, now) >= staleAfterDays(it) }
             .sortedBy { lastChecked(it) }
 
     fun isWeekendReminderTime(now: Long): Boolean {

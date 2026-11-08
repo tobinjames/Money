@@ -14,7 +14,7 @@ class ReconcileRulesTest {
 
     private val now = time(2026, 11, 14) // a Saturday
 
-    @Test fun `accounts not reconciled for 30 days are flagged, oldest first`() {
+    @Test fun `bank and cards after 30 days, FDs and loans after 60, oldest first`() {
         val accounts = listOf(
             Account(accountId = "fresh", accountType = "ASSET", ownerUserId = "me", asOfDate = 0L, lastReconciledDate = time(2026, 11, 1)),
             Account(accountId = "old", accountType = "ASSET", ownerUserId = "me", asOfDate = 0L, lastReconciledDate = time(2026, 10, 1)),
@@ -22,10 +22,11 @@ class ReconcileRulesTest {
             Account(accountId = "neverButNew", accountType = "ASSET", ownerUserId = "me", asOfDate = time(2026, 11, 1)),
             Account(accountId = "neverOld", accountType = "ASSET", ownerUserId = "me", asOfDate = time(2026, 8, 1)),
             Account(accountId = "theirs", accountType = "ASSET", ownerUserId = "partner", asOfDate = 0L),
-            Account(accountId = "fd", accountType = "ASSET", customMainCategory = "Fixed Deposits", ownerUserId = "me", asOfDate = 0L),
+            Account(accountId = "fdRecent", accountType = "ASSET", customMainCategory = "Fixed Deposits", ownerUserId = "me", asOfDate = 0L, lastReconciledDate = time(2026, 9, 20)),
+            Account(accountId = "loanOld", accountType = "LIABILITY", customMainCategory = "Loans", ownerUserId = "me", asOfDate = 0L, lastReconciledDate = time(2026, 9, 1)),
             Account(accountId = "food", accountType = "EXPENSE", ownerUserId = "me", asOfDate = 0L)
         )
-        assertEquals(listOf("neverOld", "older", "old"), ReconcileRules.stale("me", accounts, now).map { it.accountId })
+        assertEquals(listOf("neverOld", "older", "loanOld", "old"), ReconcileRules.stale("me", accounts, now).map { it.accountId })
     }
 
     @Test fun `reminders only on Friday evening and the weekend`() {

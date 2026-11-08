@@ -900,7 +900,7 @@ private fun AlertSettingsCard() {
         ToggleRow(null, "Budget alerts", "At 80% and when a budget goes over", budgets) {
             budgets = it; AlertPrefs.setBudgetAlerts(context, it)
         }
-        ToggleRow(null, "Reconcile reminders", "Friday evening and weekends, for accounts not reconciled in 30 days", reconcile) {
+        ToggleRow(null, "Reconcile reminders", "Friday evening and weekends: banks and cards after 30 days, FDs, funds and loans after 60", reconcile) {
             reconcile = it; AlertPrefs.setReconcileAlerts(context, it)
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
