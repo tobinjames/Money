@@ -151,6 +151,7 @@ object LedgerRules {
 
     /** Whether an expense in [category] (with its main/sub grouping) counts toward [budget]. */
     fun budgetMatches(budget: Budget, category: String, mainCategory: String, subCategory: String): Boolean {
+        if (budget.isOverall) return true
         val matchesSub = budget.subCategory.isNotBlank() &&
             (budget.subCategory.equals(subCategory, ignoreCase = true) || budget.subCategory.equals(category, ignoreCase = true))
         val matchesMain = budget.subCategory.isBlank() && budget.mainCategory.isNotBlank() &&
@@ -163,26 +164,27 @@ object LedgerRules {
     }
 
     /**
-     * Confirmed, non-ignored expenses toward [budget] in the calendar month containing [now].
+     * Confirmed, non-ignored expenses toward [budget] in the calendar month containing [now],
+     * less refunds: income recorded against an expense category (see [isExpenseCategory]).
      * [grouping] maps a category name to its (main, sub) grouping.
      */
     fun monthlySpent(
         budget: Budget,
         txs: List<Transaction>,
         now: Long,
+        isExpenseCategory: (String) -> Boolean = { false },
         grouping: (String) -> Pair<String, String>
     ): Double {
         val (start, end) = monthBounds(now)
         return txs.filter {
-            it.type == TransactionType.EXPENSE &&
-                it.status == TransactionStatus.CONFIRMED &&
-                !it.isIgnored &&
-                it.timestamp in start until end
+            it.status == TransactionStatus.CONFIRMED && !it.isIgnored && it.timestamp in start until end &&
+                (it.type == TransactionType.EXPENSE ||
+                    (it.type == TransactionType.INCOME && isExpenseCategory(it.category.trim())))
         }.filter {
             val category = it.category.trim()
             val (main, sub) = grouping(category)
             budgetMatches(budget, category, main, sub)
-        }.sumOf { it.amount }
+        }.sumOf { if (it.type == TransactionType.INCOME) -it.amount else it.amount }
     }
 
     fun monthBounds(time: Long): Pair<Long, Long> {

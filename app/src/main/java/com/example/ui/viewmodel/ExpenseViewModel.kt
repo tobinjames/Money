@@ -48,7 +48,6 @@ class ExpenseViewModel : ViewModel() {
     val budgets = FirebaseService.getBudgets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val softBudgetWarnings = FirebaseService.softBudgetWarnings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _toastEvent = MutableSharedFlow<String>()

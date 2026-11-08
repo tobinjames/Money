@@ -24,9 +24,10 @@ import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
 /**
- * Runs the reminder checks in the background, about once a day and whenever the app opens:
- * rolls paid recurring reminders forward, creates and settles credit card bills, and sends
- * the due-date alerts. Works without the app being open.
+ * The background check, run on both phones every few hours, when the app opens, and shortly
+ * after a transaction is saved: rolls paid recurring reminders forward, creates and settles
+ * credit card bills, and sends due-date and budget alerts. Works without the app being open.
+ * Alerts wait outside quiet hours (10 PM to 7 AM).
  */
 class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
@@ -52,11 +53,17 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val CHANNEL = "reminder_alerts_channel"
         private const val PREFS = "reminder_alert_stages"
 
-        /** Daily check at about 9 AM, plus one right away. Safe to call on every app start. */
+        private const val BUDGET_CHANNEL = "budget_alerts_channel"
+        private const val BUDGET_PREFS = "budget_alert_stages"
+        private const val SOON = "budget_check_soon"
+        private const val QUIET_FROM = 22
+        private const val QUIET_UNTIL = 7
+
+        /** A check every 6 hours from about 9 AM, plus one right away. Safe to call on every app start. */
         fun schedule(context: Context) {
             val wm = WorkManager.getInstance(context)
             val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-            val daily = PeriodicWorkRequestBuilder<ReminderWorker>(1, TimeUnit.DAYS)
+            val daily = PeriodicWorkRequestBuilder<ReminderWorker>(6, TimeUnit.HOURS)
                 .setInitialDelay(delayUntil(9), TimeUnit.MILLISECONDS)
                 .setConstraints(network)
                 .build()
@@ -65,6 +72,26 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 NOW, ExistingWorkPolicy.REPLACE,
                 OneTimeWorkRequestBuilder<ReminderWorker>().setConstraints(network).build()
             )
+        }
+
+        /**
+         * A check a minute after a transaction is saved. Each call restarts the minute, so a burst
+         * of SMS or a backfill results in a single check.
+         */
+        fun checkSoon(context: Context) {
+            try {
+                WorkManager.getInstance(context).enqueueUniqueWork(
+                    SOON, ExistingWorkPolicy.REPLACE,
+                    OneTimeWorkRequestBuilder<ReminderWorker>().setInitialDelay(1, TimeUnit.MINUTES).build()
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not schedule budget check: ${e.message}")
+            }
+        }
+
+        private fun isQuietHours(now: Long): Boolean {
+            val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
+            return hour >= QUIET_FROM || hour < QUIET_UNTIL
         }
 
         private fun delayUntil(hour: Int): Long {
@@ -98,15 +125,52 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 }
             }
 
-            // 3. Alerts, from the updated list.
+            // 3. Alerts, from the updated list. Stages not yet sent are picked up after quiet hours.
+            if (isQuietHours(now)) return
             reminders = FirebaseService.getReminders().first()
             notify(context, reminders, accounts, now)
+            notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
         }
 
+        /** 80% and over-limit alerts, once per budget per month, on every member's phone. */
+        private fun notifyBudgets(
+            context: Context,
+            budgets: List<com.example.data.Budget>,
+            txs: List<com.example.data.Transaction>,
+            categories: List<com.example.data.Account>,
+            now: Long
+        ) {
+            if (!canNotify(context)) return
+            val prefs = context.getSharedPreferences(BUDGET_PREFS, Context.MODE_PRIVATE)
+            val month = com.example.domain.LedgerRules.monthBounds(now).first
+            for (b in budgets) {
+                val spent = com.example.domain.BudgetRules.spent(b, txs, categories, now)
+                val stage = com.example.domain.BudgetRules.alertStage(spent, b.monthlyLimit) ?: continue
+                val key = "${b.budgetId}_$month"
+                val previous = prefs.getString(key, null)
+                // "over" follows "80"; never go back to an 80% alert in the same month.
+                if (previous == stage || previous == "over") continue
+                prefs.edit().putString(key, stage).apply()
+
+                val name = com.example.domain.BudgetRules.label(b)
+                val limit = "₹%,.0f".format(b.monthlyLimit)
+                val (title, text) = if (stage == "over") {
+                    "🚨 Over budget: $name" to "₹%,.0f spent this month against $limit.".format(spent)
+                } else {
+                    val perDay = com.example.domain.BudgetRules.safePerDay(b.monthlyLimit, spent, now) ?: 0.0
+                    "⚠️ $name at ${(spent / b.monthlyLimit * 100).toInt()}%" to
+                        "₹%,.0f of $limit spent. About ₹%,.0f a day left for the rest of the month.".format(spent, perDay)
+                }
+                post(context, BUDGET_CHANNEL, "Budget alerts", key.hashCode(), title, text)
+            }
+        }
+
+        private fun canNotify(context: Context): Boolean =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
         private fun notify(context: Context, reminders: List<com.example.data.Reminder>, accounts: List<com.example.data.Account>, now: Long) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-            ) return
+            if (!canNotify(context)) return
 
             val myUid = FirebaseService.getCurrentUserId()
             val partnerUid = FirebaseService.spouseUserUid.value
@@ -134,23 +198,20 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     days == 0 -> "⏳ ${prefix}Due today: ${r.title}" to "$amount is due today."
                     else -> "🔔 ${prefix}Upcoming: ${r.title}" to "$amount is due in $days day${if (days == 1) "" else "s"}."
                 }
-                post(context, r.id.hashCode(), title, text)
+                post(context, CHANNEL, "Payment Reminders", r.id.hashCode(), title, text)
             }
         }
 
-        private fun post(context: Context, id: Int, title: String, text: String) {
+        private fun post(context: Context, channel: String, channelName: String, id: Int, title: String, text: String) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                manager.createNotificationChannel(
-                    NotificationChannel(CHANNEL, "Payment Reminders", NotificationManager.IMPORTANCE_HIGH).apply {
-                        description = "Upcoming and overdue bills and scheduled payments"
-                    }
-                )
+                manager.createNotificationChannel(NotificationChannel(channel, channelName, NotificationManager.IMPORTANCE_HIGH))
             }
-            val notification = NotificationCompat.Builder(context, CHANNEL)
+            val notification = NotificationCompat.Builder(context, channel)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle(title)
                 .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()

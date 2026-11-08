@@ -201,8 +201,13 @@ data class Budget(
     val mainCategory: String = "",
     val subCategory: String = "",
     val monthlyLimit: Double = 0.0,
+    // Unused: spending is calculated from transactions (kept so old documents still load).
     val currentSpent: Double = 0.0,
-    val budgetType: BudgetType = BudgetType.SOFT
+    // Unused: every budget alerts both partners at 80% and when over.
+    val budgetType: BudgetType = BudgetType.SOFT,
+    // One budget for all household spending, across every category.
+    @get:PropertyName("isOverall") @set:PropertyName("isOverall")
+    var isOverall: Boolean = false
 )
 
 data class MerchantRule(
