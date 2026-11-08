@@ -99,6 +99,8 @@ object FirebaseService {
     val spouseUserFirstName = MutableStateFlow<String?>(null)
     val householdName = MutableStateFlow<String?>(null)
     val pendingInvite = MutableStateFlow<HouseholdInvite?>(null)
+    // Everyone in the household as (first name, email), you first.
+    val householdMembers = MutableStateFlow<List<Pair<String, String>>>(emptyList())
 
     private val householdId = MutableStateFlow<String?>(null)
     private var userEmail = ""
@@ -301,6 +303,14 @@ object FirebaseService {
         ).awaitTask()
     }
 
+    /** Renames the household for both members. */
+    suspend fun renameHousehold(name: String) {
+        val hid = householdId.value ?: throw Exception("No household is open.")
+        val clean = name.trim()
+        require(clean.isNotEmpty()) { "Enter a name." }
+        firestore!!.collection("households").document(hid).update("name", clean).awaitTask()
+    }
+
     private fun openHousehold(hid: String) {
         householdId.value = hid
         attachListeners(hid)
@@ -322,6 +332,7 @@ object FirebaseService {
         }
         householdId.value = null
         householdName.value = null
+        householdMembers.value = emptyList()
         pendingInvite.value = null
         currentUserUid.value = null
         currentUserFirstName.value = null
@@ -375,6 +386,9 @@ object FirebaseService {
             val members = doc.get("members") as? Map<*, *> ?: emptyMap<String, Any>()
             val partner = members.keys.map { it.toString() }.firstOrNull { it != myUid }
             spouseUserUid.value = partner
+            householdMembers.value = members.entries
+                .sortedBy { if (it.key == myUid) 0 else 1 }
+                .map { (_, v) -> val m = v as? Map<*, *>; Pair(m?.get("firstName") as? String ?: "", m?.get("email") as? String ?: "") }
             spouseUserFirstName.value = partner?.let { (members[it] as? Map<*, *>)?.get("firstName") as? String } ?: null
             loadedCollections.value = loadedCollections.value + HOUSEHOLD_DOC
         }
@@ -441,10 +455,15 @@ object FirebaseService {
         Account(accountId = "Others", accountName = "Others", accountType = "EXPENSE", isSystemDefault = true, iconName = "Others")
     )
 
+    // Sender IDs as they appear in bank SMS headers (e.g. "AX-HDFCBK"); matched as a whole segment.
     private fun defaultSenders() = listOf(
         WhitelistedSender("send_001", "HDFCBK", "HDFC Bank"),
         WhitelistedSender("send_002", "ICICIB", "ICICI Bank"),
-        WhitelistedSender("send_003", "SBIBNK", "SBI Bank")
+        WhitelistedSender("send_003", "SBIINB", "SBI"),
+        WhitelistedSender("send_004", "SBIUPI", "SBI UPI"),
+        WhitelistedSender("send_005", "ATMSBI", "SBI ATM/Card"),
+        WhitelistedSender("send_006", "AXISBK", "Axis Bank"),
+        WhitelistedSender("send_007", "KOTAKB", "Kotak Bank")
     )
 
     private fun defaultMerchantRules() = listOf(

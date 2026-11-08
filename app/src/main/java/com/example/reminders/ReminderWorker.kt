@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  * The background check, run on both phones every few hours, when the app opens, and shortly
  * after a transaction is saved: rolls paid recurring reminders forward, creates and settles
  * credit card bills, and sends due-date and budget alerts. Works without the app being open.
- * Alerts wait outside quiet hours (10 PM to 7 AM).
+ * Alerts wait out the quiet hours set in Settings (10 PM to 7 AM by default).
  */
 class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
@@ -56,8 +56,6 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val BUDGET_CHANNEL = "budget_alerts_channel"
         private const val BUDGET_PREFS = "budget_alert_stages"
         private const val SOON = "budget_check_soon"
-        private const val QUIET_FROM = 22
-        private const val QUIET_UNTIL = 7
 
         /** A check every 6 hours from about 9 AM, plus one right away. Safe to call on every app start. */
         fun schedule(context: Context) {
@@ -89,9 +87,9 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
         }
 
-        private fun isQuietHours(now: Long): Boolean {
+        private fun isQuietHours(context: Context, now: Long): Boolean {
             val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
-            return hour >= QUIET_FROM || hour < QUIET_UNTIL
+            return AlertPrefs.isQuiet(hour, AlertPrefs.quietFrom(context), AlertPrefs.quietUntil(context))
         }
 
         private fun delayUntil(hour: Int): Long {
@@ -126,10 +124,11 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
 
             // 3. Alerts, from the updated list. Stages not yet sent are picked up after quiet hours.
-            if (isQuietHours(now)) return
+            AlertPrefs.setLastCheck(context, now)
+            if (isQuietHours(context, now)) return
             reminders = FirebaseService.getReminders().first()
-            notify(context, reminders, accounts, now)
-            notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
+            if (AlertPrefs.reminderAlerts(context)) notify(context, reminders, accounts, now)
+            if (AlertPrefs.budgetAlerts(context)) notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
         }
 
         /** 80% and over-limit alerts, once per budget per month, on every member's phone. */
@@ -183,6 +182,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 // The card's owner when linked to an account, otherwise whoever made the reminder.
                 val owner = account?.ownerUserId?.takeIf { it.isNotBlank() } ?: r.ownerUserId
                 val partnersAccount = partnerUid != null && owner == partnerUid && owner != myUid
+                if (partnersAccount && !AlertPrefs.partnerAlerts(context)) continue
                 val days = ReminderRules.daysRemaining(r.dueDate, now)
                 val stage = ReminderRules.alertStage(days, ReminderRules.isMutualFund(r, account), partnersAccount) ?: continue
 

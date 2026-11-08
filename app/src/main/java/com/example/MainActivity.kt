@@ -154,6 +154,7 @@ class MainActivity : ComponentActivity() {
                                 ScreenTab.Analytics -> {
                                     AnalyticsScreen(
                                         viewModel = viewModel,
+                                        onOpenSettlement = { activeSubPage = "settlement" },
                                         modifier = contentModifier
                                     )
                                 }
@@ -168,7 +169,6 @@ class MainActivity : ComponentActivity() {
                                         viewModel = viewModel,
                                         onNavigateCategoryManagement = { activeSubPage = "categories" },
                                         onNavigateSmartRules = { activeSubPage = "rules" },
-                                        onNavigateFamilySettlement = { activeSubPage = "settlement" },
                                         modifier = contentModifier
                                     )
                                 }

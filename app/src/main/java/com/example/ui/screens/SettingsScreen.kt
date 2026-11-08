@@ -1,6 +1,24 @@
 package com.example.ui.screens
 
-import android.app.DatePickerDialog
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.example.BuildConfig
+import com.example.domain.CsvExport
+import com.example.reminders.AlertPrefs
+import com.example.reminders.ReminderWorker
+import java.io.File
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.example.R
 import com.example.data.*
@@ -37,25 +57,18 @@ fun SettingsScreen(
     viewModel: ExpenseViewModel,
     onNavigateCategoryManagement: () -> Unit,
     onNavigateSmartRules: () -> Unit,
-    onNavigateFamilySettlement: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val accounts by viewModel.accounts.collectAsState()
     val senders by viewModel.whitelistedSenders.collectAsState()
     val privacyKeywords by viewModel.privacyKeywords.collectAsState()
-    
-    val user1Name by viewModel.currentUserFirstName.collectAsState()
-    val user2Name by viewModel.spouseUserFirstName.collectAsState()
-    val partnerAName = user1Name ?: "User 1"
-    val partnerBName = user2Name ?: "User 2"
-    
-    val isFallback by FirebaseService.useFallback.collectAsState()
-    val householdName by FirebaseService.householdName.collectAsState()
-    val coroutineScope = rememberCoroutineScope()
 
     var showAddSender by remember { mutableStateOf(false) }
     var showAddKeyword by remember { mutableStateOf(false) }
+
+    // Sub-pages inside Settings: "main", "sms", "notifications", "advanced".
+    var page by rememberSaveable { mutableStateOf("main") }
+    BackHandler(enabled = page != "main") { page = "main" }
 
     LazyColumn(
         modifier = modifier
@@ -63,349 +76,108 @@ fun SettingsScreen(
             .testTag("settings_screen")
             .padding(horizontal = 16.dp)
     ) {
-        // --- 1. PREMIUM HEADER BANNER WITH CUSTOM GENERATED HERO IMAGE ---
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp),
-                shape = RoundedCornerShape(24.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                ) {
-                    // Hero Image
-                    androidx.compose.foundation.Image(
-                        painter = androidx.compose.ui.res.painterResource(id = R.drawable.img_settings_banner_1782846109983),
-                        contentDescription = "Control Center Banner",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                    )
-                    
-                    // Dark Overlay for Contrast
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                androidx.compose.ui.graphics.Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        Color.Black.copy(alpha = 0.8f)
-                                    )
-                                )
-                            )
-                    )
-                    
-                    // Content Layer
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(20.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "FAMILY CENTRAL HQ",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                fontSize = 9.sp,
-                                letterSpacing = 1.sp
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.height(6.dp))
-                        
-                        Text(
-                            text = "Control Center",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
-                        
-                        Text(
-                            text = "Adjust security filters, ledgers, and family automation rules",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.85f)
-                        )
-                    }
-                }
-            }
-        }
+        when (page) {
+            "main" -> {
+                item { SettingsTitle("Settings", null) }
 
-        // --- Household membership and partner invite ---
-        item { HouseholdInviteCard() }
+                item { SectionLabel("Household") }
+                item { HouseholdInviteCard() }
 
-        // --- 2. FAMILY HOUSEHOLD PROFILE HUB ---
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = "INTEGRATED HOUSEHOLD",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        letterSpacing = 1.sp
-                    )
-                    
-                    Spacer(modifier = Modifier.height(14.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // User Avatar A
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = partnerAName.take(1).uppercase(),
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
-                        
-                        // Sync Icon representation
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Synchronized Link",
-                            tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                            modifier = Modifier.size(18.dp)
-                        )
-
-                        // User Avatar B
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.secondaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = partnerBName.take(1).uppercase(),
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.weight(1f))
-                        
-                        // Workspace Tag
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = householdName ?: "Household",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                            Text(
-                                text = "Active Ledger",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF2E7D32),
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- 3. SYSTEM AUTOMATIONS BLOCK ---
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "CORE SYNCHRONIZATION",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.outline,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-                    
-                    // Cloud Sync Row (Non-interactive display)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFFE8F5E9)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = null,
-                                tint = Color(0xFF2E7D32),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "Firestore Sync Active",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Text(
-                                "Real-time updates secured",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), modifier = Modifier.padding(vertical = 8.dp))
-                    
-                    // SMS Auto Scraping Row
-                    val isAutoSyncEnabled by viewModel.isSmsAutoSyncEnabled.collectAsState()
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (isAutoSyncEnabled) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Sync,
-                                contentDescription = null,
-                                tint = if (isAutoSyncEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "Automatic SMS Scans",
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Text(
-                                if (isAutoSyncEnabled) "Enabled (Automated background parsing)" else "Paused (Manual dashboard sync only)",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (isAutoSyncEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        Switch(
+                item { SectionLabel("SMS & automation") }
+                item {
+                    SettingsCard {
+                        val isAutoSyncEnabled by viewModel.isSmsAutoSyncEnabled.collectAsState()
+                        ToggleRow(
+                            icon = Icons.Default.Sync,
+                            title = "Read bank SMS automatically",
+                            subtitle = if (isAutoSyncEnabled) "New bank SMS are added as they arrive" else "Paused; use Sync on the Dashboard",
                             checked = isAutoSyncEnabled,
                             onCheckedChange = { isChecked ->
                                 viewModel.setSmsAutoSyncSetting(context, isChecked)
-                                if (isChecked) {
-                                    viewModel.triggerToast("Automatic SMS scanning enabled.")
-                                    viewModel.runSmsInboxReconciliation(context)
-                                } else {
-                                    viewModel.triggerToast("Automatic scanning paused. Manual sync option active on Dashboard.")
-                                }
-                            },
-                            modifier = Modifier.testTag("sms_auto_sync_toggle")
+                                if (isChecked) viewModel.runSmsInboxReconciliation(context)
+                            }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Message,
+                            iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            title = "Bank senders & privacy words",
+                            subtitle = "${senders.size} senders read · ${privacyKeywords.size} words skipped",
+                            onClick = { page = "sms" }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Rule,
+                            iconContainerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.secondary,
+                            title = "Merchant rules",
+                            subtitle = "Always file a merchant under a category",
+                            onClick = onNavigateSmartRules
                         )
                     }
                 }
-            }
-        }
 
-        // --- 4. PREFERENCE STYLE DIRECT NAVIGATION REGISTRY ---
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
+                item { SectionLabel("Money setup") }
+                item {
+                    SettingsCard {
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.AccountBalance,
+                            iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            title = "Accounts & categories",
+                            subtitle = "Banks, cards, loans, income and expense categories",
+                            onClick = onNavigateCategoryManagement
+                        )
+                    }
+                }
+
+                item { SectionLabel("Notifications") }
+                item {
+                    SettingsCard {
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Notifications,
+                            iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.tertiary,
+                            title = "Alerts",
+                            subtitle = "Bills, partner backup, budgets · quiet ${hourLabel(AlertPrefs.quietFrom(context))}–${hourLabel(AlertPrefs.quietUntil(context))}",
+                            onClick = { page = "notifications" }
+                        )
+                    }
+                }
+
+                item { SectionLabel("Permissions & health") }
+                item { HealthCard() }
+
+                item { SectionLabel("Advanced") }
+                item {
+                    SettingsCard {
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Build,
+                            iconContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            title = "Advanced",
+                            subtitle = "Test an SMS, export to CSV, delete data",
+                            onClick = { page = "advanced" }
+                        )
+                    }
+                }
+
+                item { SectionLabel("Account") }
+                item { AccountCard() }
+                item { Spacer(modifier = Modifier.height(100.dp)) }
+            }
+
+            "sms" -> {
+                item { SettingsTitle("Bank senders & privacy words") { page = "main" } }
+                item {
                     Text(
-                        text = "FINANCIAL REGISTRY & SETTLEMENTS",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.outline,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-                    
-                    // Preference Row 1: Chart of Accounts
-                    SettingsPreferenceRow(
-                        icon = Icons.Default.AccountBalance,
-                        iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        iconTint = MaterialTheme.colorScheme.primary,
-                        title = "Chart of Accounts",
-                        subtitle = "Configure ledgers (assets, liabilities, expenses)",
-                        onClick = onNavigateCategoryManagement,
-                        modifier = Modifier.testTag("navigate_categories_button")
-                    )
-                    
-                    Spacer(modifier = Modifier.height(10.dp))
-                    
-                    // Preference Row 2: SMS Smart Override Rules
-                    SettingsPreferenceRow(
-                        icon = Icons.Default.Rule,
-                        iconContainerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
-                        iconTint = MaterialTheme.colorScheme.secondary,
-                        title = "SMS Smart Override Rules",
-                        subtitle = "Configure automated merchant keyword mappings",
-                        onClick = onNavigateSmartRules,
-                        modifier = Modifier.testTag("navigate_smart_rules_button")
-                    )
-                    
-                    Spacer(modifier = Modifier.height(10.dp))
-                    
-                    // Preference Row 3: Monthly Family Settlement
-                    SettingsPreferenceRow(
-                        icon = Icons.Default.Refresh,
-                        iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
-                        iconTint = MaterialTheme.colorScheme.tertiary,
-                        title = "Monthly Family Settlement",
-                        subtitle = "Calculate dual-user balance sheets & settlements",
-                        onClick = onNavigateFamilySettlement,
-                        modifier = Modifier.testTag("navigate_family_settlement_button")
+                        text = "Only SMS from these senders are read (matched on the part after the dash, e.g. AX-HDFCBK → HDFCBK). Messages containing a privacy word, like OTPs, are never read.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp)
                     )
                 }
-            }
-        }
-
         // --- 5. GATEKEEPER SMS WHITELIST ---
         item {
             Card(
@@ -424,7 +196,7 @@ fun SettingsScreen(
                     ) {
                         Column {
                             Text(
-                                text = "SMS GATEKEEPER WHITELIST",
+                                text = "BANK SMS SENDERS",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.outline,
@@ -505,7 +277,7 @@ fun SettingsScreen(
                     ) {
                         Column {
                             Text(
-                                text = "PRIVACY TERM FILTER (BLOCKLIST)",
+                                text = "PRIVACY WORDS (SMS SKIPPED)",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.outline,
@@ -576,6 +348,17 @@ fun SettingsScreen(
             }
         }
 
+                item { Spacer(modifier = Modifier.height(100.dp)) }
+            }
+
+            "notifications" -> {
+                item { SettingsTitle("Alerts") { page = "main" } }
+                item { AlertSettingsCard() }
+                item { Spacer(modifier = Modifier.height(100.dp)) }
+            }
+
+            "advanced" -> {
+                item { SettingsTitle("Advanced") { page = "main" } }
         // --- 7.5. SMS TESTING & SIMULATION PLAYGROUND ---
         item {
             val testSmsResult by viewModel.testSmsResult.collectAsState()
@@ -866,110 +649,10 @@ fun SettingsScreen(
             }
         }
 
-        // --- 8. DANGER MAINTENANCE ZONE ---
-        item {
-            var showClearConfirm by remember { mutableStateOf(false) }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.05f))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "DANGER ZONE",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.error,
-                        letterSpacing = 1.sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Allows full resetting of transaction logs. Permanent, irreversible action.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    
-                    Button(
-                        onClick = { showClearConfirm = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Remove All Transactions", style = MaterialTheme.typography.labelMedium)
-                    }
-
-                    if (showClearConfirm) {
-                        AlertDialog(
-                            onDismissRequest = { showClearConfirm = false },
-                            title = { Text("Danger: Clear All Records", fontWeight = FontWeight.Bold) },
-                            text = { Text("This permanently deletes all synchronization history inside this household workspace. Proceed with caution.") },
-                            confirmButton = {
-                                Button(
-                                    onClick = {
-                                        showClearConfirm = false
-                                        viewModel.deleteAllTransactions { success, errMsg ->
-                                            if (success) {
-                                                viewModel.triggerToast("Success: Deleted all transactions.")
-                                            } else {
-                                                viewModel.triggerToast("Clear failed: $errMsg")
-                                            }
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                                ) {
-                                    Text("Confirm Delete")
-                                }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { showClearConfirm = false }) {
-                                    Text("Cancel")
-                                }
-                            }
-                        )
-                    }
-                }
+                item { ExportCard() }
+                item { DeleteAllCard(viewModel) }
+                item { Spacer(modifier = Modifier.height(100.dp)) }
             }
-        }
-
-        item {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                androidx.compose.foundation.Image(
-                    painter = androidx.compose.ui.res.painterResource(id = R.drawable.app_logo_emblem_1786874063889),
-                    contentDescription = "Family Expense Tracker Logo",
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Family Expense Tracker",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                )
-                Text(
-                    text = "Version 2.4.0 (Secure Build)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                )
-            }
-        }
-
-        item {
-            Spacer(modifier = Modifier.height(100.dp))
         }
     }
 
@@ -1065,6 +748,343 @@ fun SettingsScreen(
                     )
                 }
             }
+        )
+    }
+}
+
+
+private fun hourLabel(hour: Int): String = when {
+    hour == 0 -> "12 AM"
+    hour < 12 -> "$hour AM"
+    hour == 12 -> "12 PM"
+    else -> "${hour - 12} PM"
+}
+
+@Composable
+private fun SettingsTitle(title: String, onBack: (() -> Unit)?) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (onBack != null) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
+        }
+        Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp, start = 4.dp)
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Column(modifier = Modifier.padding(12.dp), content = content)
+    }
+}
+
+@Composable
+private fun ToggleRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector?,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/** Alert preferences for this phone; each partner sets their own. */
+@Composable
+private fun AlertSettingsCard() {
+    val context = LocalContext.current
+    var reminders by remember { mutableStateOf(AlertPrefs.reminderAlerts(context)) }
+    var partner by remember { mutableStateOf(AlertPrefs.partnerAlerts(context)) }
+    var budgets by remember { mutableStateOf(AlertPrefs.budgetAlerts(context)) }
+    var quietFrom by remember { mutableStateOf(AlertPrefs.quietFrom(context)) }
+    var quietUntil by remember { mutableStateOf(AlertPrefs.quietUntil(context)) }
+
+    SettingsCard {
+        ToggleRow(null, "Bill & payment reminders", "15, 10, 7 and 5 days before, then daily", reminders) {
+            reminders = it; AlertPrefs.setReminderAlerts(context, it)
+        }
+        ToggleRow(null, "Partner backup alerts", "Your partner's bills, if still unpaid 3 days before", partner) {
+            partner = it; AlertPrefs.setPartnerAlerts(context, it)
+        }
+        ToggleRow(null, "Budget alerts", "At 80% and when a budget goes over", budgets) {
+            budgets = it; AlertPrefs.setBudgetAlerts(context, it)
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+        Text("Quiet hours", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(
+            "Alerts due in this window arrive when it ends. Pick the same hour twice to turn it off.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HourPicker("From", quietFrom, Modifier.weight(1f)) { quietFrom = it; AlertPrefs.setQuietHours(context, it, quietUntil) }
+            HourPicker("Until", quietUntil, Modifier.weight(1f)) { quietUntil = it; AlertPrefs.setQuietHours(context, quietFrom, it) }
+        }
+    }
+}
+
+@Composable
+private fun HourPicker(label: String, hour: Int, modifier: Modifier, onPick: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) { Text("$label ${hourLabel(hour)}") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            (0..23).forEach { h ->
+                DropdownMenuItem(text = { Text(hourLabel(h)) }, onClick = { onPick(h); open = false })
+            }
+        }
+    }
+}
+
+/** Live checks for what the background features need, each with a way to fix it. */
+@Composable
+private fun HealthCard() {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    var refresh by remember { mutableStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refresh++ }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    fun granted(p: String) = context.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+    fun openAppSettings() = context.startActivity(
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    )
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        // Android stops asking after repeated denials; send the user to the app's settings instead.
+        if (result.values.any { !it }) openAppSettings()
+        refresh++
+    }
+
+    // Read again whenever the screen resumes (e.g. back from system settings).
+    val smsOk = remember(refresh) { granted(Manifest.permission.READ_SMS) && granted(Manifest.permission.RECEIVE_SMS) }
+    val notificationsOk = remember(refresh) { NotificationManagerCompat.from(context).areNotificationsEnabled() }
+    val batteryOk = remember(refresh) {
+        (context.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
+    }
+    val lastCheck = remember(refresh) { AlertPrefs.lastCheck(context) }
+
+    SettingsCard {
+        HealthRow(
+            "Read SMS", smsOk,
+            if (smsOk) "Allowed" else "Needed to add bank transactions automatically"
+        ) { permissionLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)) }
+        HealthRow(
+            "Notifications", notificationsOk,
+            if (notificationsOk) "Allowed" else "Needed for bill and budget alerts"
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            else openAppSettings()
+        }
+        HealthRow(
+            "Background running", batteryOk,
+            if (batteryOk) "Not restricted" else "Battery saving may delay alerts and SMS; set the app to Unrestricted"
+        ) {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Last background check", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    if (lastCheck == 0L) "Not run yet"
+                    else SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(lastCheck)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(onClick = {
+                ReminderWorker.schedule(context)
+                android.widget.Toast.makeText(context, "Checking now", android.widget.Toast.LENGTH_SHORT).show()
+            }) { Text("Check now") }
+        }
+    }
+}
+
+@Composable
+private fun HealthRow(title: String, ok: Boolean, detail: String, onFix: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = if (ok) Icons.Default.CheckCircle else Icons.Default.Warning,
+            contentDescription = if (ok) "OK" else "Needs attention",
+            tint = if (ok) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (!ok) TextButton(onClick = onFix) { Text("Fix") }
+    }
+}
+
+/** Shares every transaction as a CSV file (opens the share sheet: Drive, email, etc.). */
+@Composable
+private fun ExportCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    SettingsCard {
+        Text("Export transactions", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(
+            "A CSV file of every transaction, for a spreadsheet or a backup.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { scope.launch {
+                try {
+                    // Straight from the household data, which is always loaded while signed in.
+                    val csv = CsvExport.transactions(
+                        FirebaseService.getTransactions().first(),
+                        FirebaseService.getCategories().first()
+                    )
+                    val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+                    val stamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                    val file = File(dir, "transactions-$stamp.csv").apply { writeText(csv) }
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                    val send = Intent(Intent.ACTION_SEND)
+                        .setType("text/csv")
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(Intent.createChooser(send, "Export transactions").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Export CSV")
+        }
+    }
+}
+
+/** Deletes every transaction, for both partners, after typing DELETE. */
+@Composable
+private fun DeleteAllCard(viewModel: ExpenseViewModel) {
+    var confirming by remember { mutableStateOf(false) }
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.05f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Delete all transactions", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
+            Text(
+                "Removes every transaction for both of you. Accounts, budgets and reminders stay. This can't be undone; export first if you want a copy.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { confirming = true },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("Delete all transactions") }
+        }
+    }
+
+    if (confirming) {
+        var typed by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Delete all transactions?", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text("This deletes them for your partner too. Type DELETE to confirm.")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = typed, onValueChange = { typed = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirming = false
+                        viewModel.deleteAllTransactions { success, errMsg ->
+                            viewModel.triggerToast(if (success) "All transactions deleted." else "Delete failed: $errMsg")
+                        }
+                    },
+                    enabled = typed.trim() == "DELETE",
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun AccountCard() {
+    val name = FirebaseService.getCurrentUserDisplayName()
+    val email = FirebaseService.getCurrentUserEmail()
+    SettingsCard {
+        Text(name.ifBlank { "Signed in" }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp))
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = { FirebaseService.logout() }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Sign out")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Family Expense Tracker · version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
     }
 }

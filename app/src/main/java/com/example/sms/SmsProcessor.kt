@@ -26,10 +26,8 @@ object SmsProcessor {
         val cleanBody = body.lowercase()
         val cleanSender = sender.lowercase().trim()
 
-        // 1. Sender Whitelist Check: Keep ONLY if the sender ID contains a whitelisted sender shortcode
-        val isWhitelisted = whitelistedSenders.any { 
-            cleanSender.contains(it.senderId.lowercase().trim()) 
-        }
+        // 1. Sender check: keep only SMS whose header carries a saved bank sender ID.
+        val isWhitelisted = whitelistedSenders.any { com.example.domain.SenderRules.matches(cleanSender, it.senderId) }
         if (!isWhitelisted) {
             Log.d(TAG, "Pre-filter: Rejected SMS. Sender '$sender' is not whitelisted.")
             return false

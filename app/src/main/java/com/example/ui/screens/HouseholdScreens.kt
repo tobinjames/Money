@@ -136,15 +136,17 @@ fun HouseholdSetupScreen() {
     }
 }
 
-/** Settings card: shows the household and lets a member invite their partner by email. */
+/** Settings card: the household's name (editable), its members, and inviting a partner. */
 @Composable
 fun HouseholdInviteCard() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val household by FirebaseService.householdName.collectAsState()
     val partner by FirebaseService.spouseUserFirstName.collectAsState()
+    val members by FirebaseService.householdMembers.collectAsState()
     var email by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -153,16 +155,33 @@ fun HouseholdInviteCard() {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(Modifier.padding(20.dp)) {
-            Text(
-                text = household ?: "Household",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = partner?.let { "Shared with $it." } ?: "Only you are in this household. Invite your partner by email; they join when they sign in.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = household ?: "Household",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { renaming = true }) { Text("Rename") }
+            }
+            members.forEachIndexed { i, (name, mail) ->
+                Text(
+                    text = buildString {
+                        append(name.ifBlank { "Member" })
+                        if (i == 0) append(" (you)")
+                        if (mail.isNotBlank()) append(" · ").append(mail)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (partner == null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Invite your partner by email; they join when they sign in and tap Join.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (partner == null) {
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
@@ -195,5 +214,32 @@ fun HouseholdInviteCard() {
                 ) { Text("Invite partner") }
             }
         }
+    }
+
+    if (renaming) {
+        var name by remember { mutableStateOf(household ?: "") }
+        AlertDialog(
+            onDismissRequest = { renaming = false },
+            title = { Text("Rename household") },
+            text = {
+                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                FirebaseService.renameHousehold(name)
+                                renaming = false
+                            } catch (e: Exception) {
+                                Toast.makeText(context, e.message ?: "Could not rename.", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    enabled = name.isNotBlank()
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } }
+        )
     }
 }
