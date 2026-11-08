@@ -731,7 +731,10 @@ class ExpenseViewModel : ViewModel() {
                     isRecurring = isRecurring,
                     isPaid = false,
                     accountId = accountId,
-                    dueDay = com.example.domain.ReminderRules.dayOfMonth(dueDate)
+                    dueDay = com.example.domain.ReminderRules.dayOfMonth(dueDate),
+                    // A card reminder belongs to the card's owner; anything else to whoever made it.
+                    ownerUserId = accounts.value.find { it.accountId == accountId }?.ownerUserId?.takeIf { it.isNotBlank() }
+                        ?: FirebaseService.getCurrentUserId()
                 )
             )
         }

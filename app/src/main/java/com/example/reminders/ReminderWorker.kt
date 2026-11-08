@@ -116,8 +116,9 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             for (r in reminders) {
                 if (r.isPaid) continue
                 val account = accounts.find { it.accountId == r.accountId }
-                val owner = account?.ownerUserId
-                val partnersAccount = owner != null && partnerUid != null && owner == partnerUid && owner != myUid
+                // The card's owner when linked to an account, otherwise whoever made the reminder.
+                val owner = account?.ownerUserId?.takeIf { it.isNotBlank() } ?: r.ownerUserId
+                val partnersAccount = partnerUid != null && owner == partnerUid && owner != myUid
                 val days = ReminderRules.daysRemaining(r.dueDate, now)
                 val stage = ReminderRules.alertStage(days, ReminderRules.isMutualFund(r, account), partnersAccount) ?: continue
 
@@ -126,7 +127,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 if (prefs.getString(key, null) == stage) continue
                 prefs.edit().putString(key, stage).apply()
 
-                val prefix = if (partnersAccount) "[$partnerName's account] " else ""
+                val prefix = if (partnersAccount) "[$partnerName's, still unpaid] " else ""
                 val amount = "₹%,.2f".format(r.amount)
                 val (title, text) = when {
                     days < 0 -> "🚨 ${prefix}Overdue: ${r.title}" to "$amount was due ${-days} day${if (days == -1) "" else "s"} ago."

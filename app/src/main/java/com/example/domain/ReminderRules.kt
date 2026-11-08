@@ -19,6 +19,9 @@ object ReminderRules {
     /** How early the next occurrence of a paid recurring reminder appears. */
     const val ROLL_FORWARD_DAYS = 15
 
+    /** The partner is alerted about the other person's unpaid reminders from this many days before. */
+    const val PARTNER_BACKUP_DAYS = 3
+
     /** Overdue alerts repeat daily for this many days, then stop. */
     const val MAX_OVERDUE_ALERT_DAYS = 7
 
@@ -127,7 +130,7 @@ object ReminderRules {
             accountId = account.accountId,
             statementDate = cycle.statementDate
         )
-        return reminder to cycle
+        return reminder.copy(ownerUserId = account.ownerUserId) to cycle
     }
 
     /**
@@ -154,12 +157,13 @@ object ReminderRules {
      * whenever the stage changes, so a day the phone was off is caught up with one alert.
      * - Normal: 15, 10, 7 and 5 days before, then daily, then daily overdue for a week.
      * - Mutual funds / SIPs: one alert in the last 5 days.
-     * - Partner's own account: only from 5 days before (a backup reminder).
+     * - The partner's reminders (their card or a reminder they made): this phone joins in only
+     *   when it is still unpaid [PARTNER_BACKUP_DAYS] days before the due date, as a backup.
      */
     fun alertStage(daysRemaining: Int, mutualFund: Boolean, partnersAccount: Boolean): String? {
         if (daysRemaining < -MAX_OVERDUE_ALERT_DAYS) return null
+        if (partnersAccount && daysRemaining > PARTNER_BACKUP_DAYS) return null
         if (mutualFund) return if (daysRemaining <= 5) "mf" else null
-        if (partnersAccount && daysRemaining > 5) return null
         return when {
             daysRemaining <= 4 -> "d$daysRemaining"
             daysRemaining <= 5 -> "t5"

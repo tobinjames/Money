@@ -109,7 +109,12 @@ class ReminderRulesTest {
         assertNull(ReminderRules.alertStage(-8, false, false))
         assertEquals("mf", ReminderRules.alertStage(3, true, false))
         assertNull(ReminderRules.alertStage(8, true, false))
+        // Partner's reminder: only once it is 3 days out and still unpaid, then daily.
         assertNull(ReminderRules.alertStage(9, false, true))
+        assertNull(ReminderRules.alertStage(4, false, true))
         assertEquals("d3", ReminderRules.alertStage(3, false, true))
+        assertEquals("d-1", ReminderRules.alertStage(-1, false, true))
+        assertNull(ReminderRules.alertStage(5, true, true))
+        assertEquals("mf", ReminderRules.alertStage(2, true, true))
     }
 }

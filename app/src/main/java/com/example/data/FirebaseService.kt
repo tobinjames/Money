@@ -80,7 +80,9 @@ object FirebaseService {
     private const val COL_SENDERS = "smsSenders"
     private const val COL_RULES = "merchantRules"
     private const val COL_KEYWORDS = "privacyKeywords"
-    private val ALL_COLLECTIONS = setOf(COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_SENDERS, COL_RULES, COL_KEYWORDS)
+    // The household document itself (names and partner), loaded alongside the collections.
+    private const val HOUSEHOLD_DOC = "household"
+    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_SENDERS, COL_RULES, COL_KEYWORDS)
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var firestore: FirebaseFirestore? = null
@@ -376,6 +378,7 @@ object FirebaseService {
             val partner = members.keys.map { it.toString() }.firstOrNull { it != myUid }
             spouseUserUid.value = partner
             spouseUserFirstName.value = partner?.let { (members[it] as? Map<*, *>)?.get("firstName") as? String } ?: null
+            loadedCollections.value = loadedCollections.value + HOUSEHOLD_DOC
         }
 
         listeners = listOf(

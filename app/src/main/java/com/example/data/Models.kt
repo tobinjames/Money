@@ -179,7 +179,9 @@ data class Reminder(
     // Day of month a recurring reminder falls on, kept so a 31st doesn't drift after February.
     val dueDay: Int = 0,
     // For automatic credit card bills: the statement date the bill is for.
-    val statementDate: Long = 0L
+    val statementDate: Long = 0L,
+    // Whose reminder this is: a user id, "SHARED", or "" (old reminders; everyone is alerted).
+    val ownerUserId: String = ""
 )
 
 data class WhitelistedSender(
