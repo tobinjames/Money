@@ -128,6 +128,8 @@ object FirebaseService {
             if (FirebaseApp.getApps(context).isEmpty()) {
                 FirebaseApp.initializeApp(context)
             }
+            // Proves requests come from this app (see AppCheckSetup in src/debug and src/release).
+            AppCheckSetup.install()
             firestore = FirebaseFirestore.getInstance()
             auth = FirebaseAuth.getInstance()
             restoreSession()

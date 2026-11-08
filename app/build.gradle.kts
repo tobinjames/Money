@@ -100,6 +100,9 @@ dependencies {
   implementation(libs.firebase.auth)
   implementation(libs.play.services.auth)
   implementation(libs.firebase.firestore)
+  // App Check: Play Integrity in release builds, a debug token in debug builds.
+  releaseImplementation(libs.firebase.appcheck.playintegrity)
+  debugImplementation(libs.firebase.appcheck.debug)
   implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
