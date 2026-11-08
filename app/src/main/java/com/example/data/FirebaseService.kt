@@ -128,7 +128,7 @@ object FirebaseService {
             if (FirebaseApp.getApps(context).isEmpty()) {
                 FirebaseApp.initializeApp(context)
             }
-            // Proves requests come from this app (see AppCheckSetup in src/debug and src/release).
+            // Proves requests come from this app on a registered phone (see AppCheckSetup).
             AppCheckSetup.install()
             firestore = FirebaseFirestore.getInstance()
             auth = FirebaseAuth.getInstance()
