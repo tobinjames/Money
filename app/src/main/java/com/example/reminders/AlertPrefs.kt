@@ -31,6 +31,10 @@ object AlertPrefs {
     fun salaryDay(context: Context) = prefs(context).getInt("salary_day", 0)
     fun setSalaryDay(context: Context, day: Int) = prefs(context).edit().putInt("salary_day", day).apply()
 
+    /** Weekend reminders for accounts not reconciled in 30 days. */
+    fun reconcileAlerts(context: Context) = prefs(context).getBoolean("reconcile_alerts", true)
+    fun setReconcileAlerts(context: Context, on: Boolean) = prefs(context).edit().putBoolean("reconcile_alerts", on).apply()
+
     /** Alert when Free to spend drops below this amount. */
     fun lowBalanceAlerts(context: Context) = prefs(context).getBoolean("low_balance_alerts", true)
     fun setLowBalanceAlerts(context: Context, on: Boolean) = prefs(context).edit().putBoolean("low_balance_alerts", on).apply()

@@ -150,7 +150,7 @@ fun SettingsScreen(
                             iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
                             iconTint = MaterialTheme.colorScheme.tertiary,
                             title = "Alerts",
-                            subtitle = "Bills, partner backup, budgets · quiet ${hourLabel(AlertPrefs.quietFrom(context))}–${hourLabel(AlertPrefs.quietUntil(context))}",
+                            subtitle = "Bills, partner backup, budgets, reconcile · quiet ${hourLabel(AlertPrefs.quietFrom(context))}–${hourLabel(AlertPrefs.quietUntil(context))}",
                             onClick = { page = "notifications" }
                         )
                     }
@@ -886,6 +886,7 @@ private fun AlertSettingsCard() {
     var reminders by remember { mutableStateOf(AlertPrefs.reminderAlerts(context)) }
     var partner by remember { mutableStateOf(AlertPrefs.partnerAlerts(context)) }
     var budgets by remember { mutableStateOf(AlertPrefs.budgetAlerts(context)) }
+    var reconcile by remember { mutableStateOf(AlertPrefs.reconcileAlerts(context)) }
     var quietFrom by remember { mutableStateOf(AlertPrefs.quietFrom(context)) }
     var quietUntil by remember { mutableStateOf(AlertPrefs.quietUntil(context)) }
 
@@ -898,6 +899,9 @@ private fun AlertSettingsCard() {
         }
         ToggleRow(null, "Budget alerts", "At 80% and when a budget goes over", budgets) {
             budgets = it; AlertPrefs.setBudgetAlerts(context, it)
+        }
+        ToggleRow(null, "Reconcile reminders", "Friday evening and weekends, for accounts not reconciled in 30 days", reconcile) {
+            reconcile = it; AlertPrefs.setReconcileAlerts(context, it)
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         Text("Quiet hours", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
