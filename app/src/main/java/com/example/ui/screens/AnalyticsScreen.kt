@@ -84,7 +84,6 @@ data class TagSubLedgerSummary(
 @Composable
 fun AnalyticsScreen(
     viewModel: ExpenseViewModel,
-    onOpenSettlement: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val transactionsState by viewModel.transactions.collectAsState()
@@ -415,19 +414,6 @@ fun AnalyticsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            }
-        }
-
-        // Monthly settlement between partners (moved here from Settings).
-        item {
-            OutlinedButton(
-                onClick = onOpenSettlement,
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("open_settlement_btn"),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Monthly family settlement")
             }
         }
 

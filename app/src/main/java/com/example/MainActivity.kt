@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
-                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules", or "settlement"
+                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories" or "rules"
 
                 if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
                     HouseholdSetupScreen()
@@ -84,11 +84,6 @@ class MainActivity : ComponentActivity() {
                     )
                 } else if (activeSubPage == "rules") {
                     SmartRulesScreen(
-                        viewModel = viewModel,
-                        onBackClick = { activeSubPage = null }
-                    )
-                } else if (activeSubPage == "settlement") {
-                    FamilySettlementDashboard(
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
@@ -154,7 +149,6 @@ class MainActivity : ComponentActivity() {
                                 ScreenTab.Analytics -> {
                                     AnalyticsScreen(
                                         viewModel = viewModel,
-                                        onOpenSettlement = { activeSubPage = "settlement" },
                                         modifier = contentModifier
                                     )
                                 }
