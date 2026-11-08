@@ -621,19 +621,6 @@ object FirebaseService {
         remove(COL_TRANSACTIONS, oldTx.transactionId)
     }
 
-    /** Deletes every transaction in this household (Settings > danger zone). */
-    suspend fun deleteAllTransactions() {
-        val fs = firestore ?: return
-        val ref = col(COL_TRANSACTIONS) ?: return
-        val docs = ref.get().awaitTask().documents
-        docs.chunked(450).forEach { chunk ->
-            val batch = fs.batch()
-            chunk.forEach { batch.delete(it.reference) }
-            batch.commit().awaitTask()
-        }
-        localTransactions.value = emptyList()
-    }
-
     // ---------------------------------------------------------------------------------------
     // Budgets
     // ---------------------------------------------------------------------------------------

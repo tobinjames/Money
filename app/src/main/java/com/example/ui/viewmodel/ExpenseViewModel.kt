@@ -887,17 +887,6 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
-    fun deleteAllTransactions(onComplete: (Boolean, String?) -> Unit) {
-        viewModelScope.launch {
-            try {
-                FirebaseService.deleteAllTransactions()
-                onComplete(true, null)
-            } catch (e: Exception) {
-                onComplete(false, e.localizedMessage ?: e.message)
-            }
-        }
-    }
-
     private val _testSmsResult = MutableStateFlow<TestSmsResult?>(null)
     val testSmsResult: StateFlow<TestSmsResult?> = _testSmsResult.asStateFlow()
 

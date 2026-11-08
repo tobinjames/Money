@@ -157,7 +157,7 @@ fun SettingsScreen(
                             iconContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                             iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
                             title = "Advanced",
-                            subtitle = "Test an SMS, export to CSV, delete data",
+                            subtitle = "Test an SMS, export to CSV",
                             onClick = { page = "advanced" }
                         )
                     }
@@ -650,7 +650,6 @@ fun SettingsScreen(
         }
 
                 item { ExportCard() }
-                item { DeleteAllCard(viewModel) }
                 item { Spacer(modifier = Modifier.height(100.dp)) }
             }
         }
@@ -1006,62 +1005,6 @@ private fun ExportCard() {
             Spacer(Modifier.width(8.dp))
             Text("Export CSV")
         }
-    }
-}
-
-/** Deletes every transaction, for both partners, after typing DELETE. */
-@Composable
-private fun DeleteAllCard(viewModel: ExpenseViewModel) {
-    var confirming by remember { mutableStateOf(false) }
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f)),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.05f))
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Delete all transactions", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-            Text(
-                "Removes every transaction for both of you. Accounts, budgets and reminders stay. This can't be undone; export first if you want a copy.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = { confirming = true },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) { Text("Delete all transactions") }
-        }
-    }
-
-    if (confirming) {
-        var typed by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { confirming = false },
-            title = { Text("Delete all transactions?", fontWeight = FontWeight.Bold) },
-            text = {
-                Column {
-                    Text("This deletes them for your partner too. Type DELETE to confirm.")
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = typed, onValueChange = { typed = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        confirming = false
-                        viewModel.deleteAllTransactions { success, errMsg ->
-                            viewModel.triggerToast(if (success) "All transactions deleted." else "Delete failed: $errMsg")
-                        }
-                    },
-                    enabled = typed.trim() == "DELETE",
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("Delete") }
-            },
-            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } }
-        )
     }
 }
 
