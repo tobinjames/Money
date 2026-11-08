@@ -60,6 +60,8 @@ data class Account(
     val reconciledBalance: Double? = null,
     val billingCycleDay: Int = 0, // Day of month for billing cycle (e.g., 15)
     val paymentDueDay: Int = 0, // Day of month for bill payment due (e.g., 5)
+    // Latest statement ("yyyy_MM") an automatic bill reminder was made for; stops deleted bills coming back.
+    val lastBillReminderCycle: String = "",
     
     // Custom fields for Chart of Accounts (unified category model)
     val customAccountClass: String = "",
@@ -173,7 +175,11 @@ data class Reminder(
     var isRecurring: Boolean = false,
     @get:PropertyName("isPaid") @set:PropertyName("isPaid")
     var isPaid: Boolean = false,
-    val accountId: String? = null
+    val accountId: String? = null,
+    // Day of month a recurring reminder falls on, kept so a 31st doesn't drift after February.
+    val dueDay: Int = 0,
+    // For automatic credit card bills: the statement date the bill is for.
+    val statementDate: Long = 0L
 )
 
 data class WhitelistedSender(

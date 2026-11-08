@@ -265,22 +265,27 @@ fun RemindersScreen(
                                                     )
                                                 }
                                                 
-                                                TextButton(
-                                                    onClick = {
-                                                        title = "${card.name} Bill"
-                                                        val fillAmount = if (statementBalance > 0) statementBalance else if (card.balance != 0.0) Math.abs(card.balance) else 5000.0
-                                                        amountStr = String.format(Locale.US, "%.2f", fillAmount)
-                                                        reminderType = "Credit Card"
-                                                        selectedAccountId = card.id
-                                                        isRecurring = true
-                                                        showAddReminderDialog = true
-                                                    },
-                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                                    modifier = Modifier.height(28.dp)
-                                                ) {
-                                                    Icon(Icons.Default.Alarm, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("Set Reminder", fontSize = 11.sp)
+                                                if (com.example.domain.ReminderRules.hasAutoBills(card)) {
+                                                    // Bills for this card are created automatically after each statement.
+                                                    Text("Auto bill reminders on", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                                } else {
+                                                    TextButton(
+                                                        onClick = {
+                                                            title = "${card.name} Bill"
+                                                            val fillAmount = if (statementBalance > 0) statementBalance else if (card.balance != 0.0) Math.abs(card.balance) else 5000.0
+                                                            amountStr = String.format(Locale.US, "%.2f", fillAmount)
+                                                            reminderType = "Credit Card"
+                                                            selectedAccountId = card.id
+                                                            isRecurring = false
+                                                            showAddReminderDialog = true
+                                                        },
+                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                                        modifier = Modifier.height(28.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.Alarm, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text("Set Reminder", fontSize = 11.sp)
+                                                    }
                                                 }
                                             }
                                         }

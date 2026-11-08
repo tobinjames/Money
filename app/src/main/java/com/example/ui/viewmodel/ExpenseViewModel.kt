@@ -730,7 +730,8 @@ class ExpenseViewModel : ViewModel() {
                     dueDate = dueDate,
                     isRecurring = isRecurring,
                     isPaid = false,
-                    accountId = accountId
+                    accountId = accountId,
+                    dueDay = com.example.domain.ReminderRules.dayOfMonth(dueDate)
                 )
             )
         }
@@ -738,7 +739,12 @@ class ExpenseViewModel : ViewModel() {
 
     fun updateReminder(reminder: Reminder) {
         viewModelScope.launch {
-            FirebaseService.updateReminder(reminder)
+            // A new due date picked by the user becomes the day the series repeats on.
+            val before = reminders.value.find { it.id == reminder.id }
+            val updated = if (before == null || before.dueDate != reminder.dueDate) {
+                reminder.copy(dueDay = com.example.domain.ReminderRules.dayOfMonth(reminder.dueDate))
+            } else reminder
+            FirebaseService.updateReminder(updated)
         }
     }
 
@@ -748,331 +754,15 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
+    /** What the card owed at its latest statement date. */
     fun getCardBillingCycleBalance(account: Account): Double {
-        val cycleDay = if (account.billingCycleDay > 0) account.billingCycleDay else 15
-        val calNow = java.util.Calendar.getInstance()
-        val currentDay = calNow.get(java.util.Calendar.DAY_OF_MONTH)
-        
-        val cycleCal = java.util.Calendar.getInstance().apply {
-            if (currentDay < cycleDay) {
-                add(java.util.Calendar.MONTH, -1)
-            }
-            val maxDay = getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            val d = if (cycleDay > maxDay) maxDay else cycleDay
-            set(java.util.Calendar.DAY_OF_MONTH, d)
-            set(java.util.Calendar.HOUR_OF_DAY, 23)
-            set(java.util.Calendar.MINUTE, 59)
-            set(java.util.Calendar.SECOND, 59)
-            set(java.util.Calendar.MILLISECOND, 999)
-        }
-        val billingCycleTimeMs = cycleCal.timeInMillis
-        
-        val txs = transactions.value
-        val nonIgnoredTx = txs.filter { !it.isIgnored && it.status == TransactionStatus.CONFIRMED }
-        val debitSum = nonIgnoredTx.filter { it.debitAccountId == account.accountId && it.date <= billingCycleTimeMs }.sumOf { it.amount }
-        val creditSum = nonIgnoredTx.filter { it.creditAccountId == account.accountId && it.date <= billingCycleTimeMs }.sumOf { it.amount }
-        
-        return account.openingBalance + creditSum - debitSum
-    }
-
-    fun runRemindersCheck(context: Context) {
-        viewModelScope.launch(Dispatchers.IO) {
-            combine(reminders, accounts, transactions) { recs, accs, _ -> Pair(recs, accs) }
-                .collect { (list, accs) ->
-                    checkAndGenerateCreditCardReminders(list, accs)
-                    checkAndGenerateNextRecurringReminders(list)
-                    checkAndTriggerReminderNotifications(context, list, accs)
-                }
-        }
-    }
-
-    private suspend fun checkAndGenerateCreditCardReminders(remindersList: List<Reminder>, accountsList: List<Account>) {
-        val ccAccounts = accountsList.filter { 
-            (it.mainCategory.equals("Credit Cards", ignoreCase = true) || 
-             it.customMainCategory.equals("Credit Cards", ignoreCase = true) || 
-             it.type == AccountType.CREDIT_CARD || 
-             it.accountType == "LIABILITY") && 
-            it.billingCycleDay > 0 && it.paymentDueDay > 0 
-        }
-        if (ccAccounts.isEmpty()) return
-
-        val txs = transactions.value
-
-        val calendar = java.util.Calendar.getInstance()
-        val currentYear = calendar.get(java.util.Calendar.YEAR)
-        val currentMonth = calendar.get(java.util.Calendar.MONTH) // 0-11
-
-        // Check current month's cycle and previous month's cycle
-        val cyclesToCheck = listOf(
-            // Current month billing cycle
-            Pair(currentYear, currentMonth),
-            // Previous month billing cycle
-            if (currentMonth == 0) Pair(currentYear - 1, 11) else Pair(currentYear, currentMonth - 1)
+        // Cards without days set are shown with the screen's defaults (statement 15th, due 5th).
+        val withDays = account.copy(
+            billingCycleDay = account.billingCycleDay.takeIf { it in 1..31 } ?: 15,
+            paymentDueDay = account.paymentDueDay.takeIf { it in 1..31 } ?: 5
         )
-
-        for (account in ccAccounts) {
-            for ((cycleYear, cycleMonth) in cyclesToCheck) {
-                // Calculate billing cycle end date
-                val billCal = java.util.Calendar.getInstance().apply {
-                    clear()
-                    set(java.util.Calendar.YEAR, cycleYear)
-                    set(java.util.Calendar.MONTH, cycleMonth)
-                    val maxDay = getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-                    val d = if (account.billingCycleDay > maxDay) maxDay else account.billingCycleDay
-                    set(java.util.Calendar.DAY_OF_MONTH, d)
-                    set(java.util.Calendar.HOUR_OF_DAY, 23)
-                    set(java.util.Calendar.MINUTE, 59)
-                    set(java.util.Calendar.SECOND, 59)
-                    set(java.util.Calendar.MILLISECOND, 999)
-                }
-                val billingCycleTimeMs = billCal.timeInMillis
-
-                // If billing cycle is in the future, we cannot calculate closing balance yet
-                if (billingCycleTimeMs > System.currentTimeMillis()) continue
-
-                // Calculate payment due date
-                val dueCal = java.util.Calendar.getInstance().apply {
-                    clear()
-                    set(java.util.Calendar.YEAR, cycleYear)
-                    set(java.util.Calendar.MONTH, cycleMonth)
-                    if (account.paymentDueDay < account.billingCycleDay) {
-                        add(java.util.Calendar.MONTH, 1)
-                    }
-                    val maxDay = getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-                    val d = if (account.paymentDueDay > maxDay) maxDay else account.paymentDueDay
-                    set(java.util.Calendar.DAY_OF_MONTH, d)
-                    set(java.util.Calendar.HOUR_OF_DAY, 18) // 6 PM
-                    set(java.util.Calendar.MINUTE, 0)
-                    set(java.util.Calendar.SECOND, 0)
-                    set(java.util.Calendar.MILLISECOND, 0)
-                }
-                val dueTimeMs = dueCal.timeInMillis
-
-                // Uniquely identify reminder for this credit card and billing cycle
-                val uniqueId = "cc_rem_${account.accountId}_${cycleYear}_${cycleMonth}"
-
-                // Check if a reminder already exists with this ID or matches this dueTimeMs and accountId
-                val existing = remindersList.find { 
-                    it.id == uniqueId || (it.accountId == account.accountId && it.dueDate == dueTimeMs) 
-                }
-
-                // Compute Closing Balance strictly up to billingCycleTimeMs
-                val nonIgnoredTx = txs.filter { !it.isIgnored && it.status == TransactionStatus.CONFIRMED }
-                val debitSum = nonIgnoredTx.filter { it.debitAccountId == account.accountId && it.date <= billingCycleTimeMs }.sumOf { it.amount }
-                val creditSum = nonIgnoredTx.filter { it.creditAccountId == account.accountId && it.date <= billingCycleTimeMs }.sumOf { it.amount }
-                
-                val closingBalance = account.openingBalance + creditSum - debitSum
-
-                if (existing == null) {
-                    // Only create a reminder if there's a positive due balance
-                    if (closingBalance > 0) {
-                        val reminderTitle = "${account.name} Bill (${getMonthName(cycleMonth)} Cycle)"
-                        val cardReminder = Reminder(
-                            id = uniqueId,
-                            title = reminderTitle,
-                            amount = closingBalance,
-                            type = "Credit Card",
-                            isRecurring = false,
-                            isPaid = false,
-                            dueDate = dueTimeMs,
-                            accountId = account.accountId
-                        )
-                        Log.d(TAG, "Automatically creating credit card reminder: $reminderTitle due on $dueTimeMs, amount $closingBalance")
-                        FirebaseService.addReminder(cardReminder)
-                    }
-                } else if (!existing.isPaid) {
-                    // Use the balance till the billing cycle end date to update credit card bill payable
-                    if (closingBalance > 0 && Math.abs(existing.amount - closingBalance) > 0.01) {
-                        val updatedReminder = existing.copy(
-                            amount = closingBalance,
-                            title = if (existing.title.isBlank()) "${account.name} Bill (${getMonthName(cycleMonth)} Cycle)" else existing.title
-                        )
-                        Log.d(TAG, "Updating credit card bill payable for ${account.name} to $closingBalance")
-                        FirebaseService.updateReminder(updatedReminder)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun getMonthName(month: Int): String {
-        val names = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-        return if (month in 0..11) names[month] else ""
-    }
-
-    private fun getNextMonthDueDate(currentDueDateMs: Long): Long {
-        val cal = java.util.Calendar.getInstance().apply {
-            timeInMillis = currentDueDateMs
-            add(java.util.Calendar.MONTH, 1)
-        }
-        return cal.timeInMillis
-    }
-
-    private suspend fun checkAndGenerateNextRecurringReminders(remindersList: List<Reminder>) {
-        val now = System.currentTimeMillis()
-        val fifteenDaysInMs = 15L * 24 * 60 * 60 * 1000
-        
-        val newRemindersToCreate = mutableListOf<Reminder>()
-        
-        for (reminder in remindersList) {
-            if (!reminder.isRecurring) continue
-            
-            // Calculate next instance due date
-            val nextDue = getNextMonthDueDate(reminder.dueDate)
-            
-            // Check if we are within 15 days of the next due date
-            if (now >= nextDue - fifteenDaysInMs) {
-                // Check if an instance already exists for this title & nextDue to avoid duplicates
-                val alreadyExists = remindersList.any { 
-                    it.title.equals(reminder.title, ignoreCase = true) && it.dueDate == nextDue 
-                }
-                if (!alreadyExists) {
-                    val nextInstance = Reminder(
-                        title = reminder.title,
-                        amount = reminder.amount,
-                        type = reminder.type,
-                        dueDate = nextDue,
-                        isRecurring = true,
-                        isPaid = false,
-                        accountId = reminder.accountId
-                    )
-                    newRemindersToCreate.add(nextInstance)
-                }
-            }
-        }
-        
-        for (newReminder in newRemindersToCreate) {
-            Log.d(TAG, "Auto-generating recurring reminder 15 days in advance: ${newReminder.title} due on ${newReminder.dueDate}")
-            FirebaseService.addReminder(newReminder)
-        }
-    }
-
-    private fun checkAndTriggerReminderNotifications(context: Context, remindersList: List<Reminder>, accountsList: List<Account>) {
-        val now = System.currentTimeMillis()
-        val oneDayMs = 24L * 60 * 60 * 1000
-        val currentUid = FirebaseService.getCurrentUserId()
-        val spouseUid = FirebaseService.spouseUserUid.value ?: ""
-        val currentFirstName = FirebaseService.currentUserFirstName.value ?: "Me"
-        val spouseFirstName = FirebaseService.spouseUserFirstName.value ?: "Partner"
-        
-        for (reminder in remindersList) {
-            if (reminder.isPaid) continue
-            
-            val diffMs = reminder.dueDate - now
-            val daysRemaining = Math.ceil(diffMs.toDouble() / oneDayMs.toDouble()).toInt()
-            val matchedAccount = accountsList.find { it.id == reminder.accountId }
-            
-            val isMutualFundReminder = reminder.type.equals("SIP", ignoreCase = true) ||
-                                       reminder.type.equals("Mutual Fund", ignoreCase = true) ||
-                                       reminder.title.contains("Mutual Fund", ignoreCase = true) ||
-                                       reminder.title.contains("SIP", ignoreCase = true) ||
-                                       (matchedAccount?.accountName?.contains("Mutual Fund", ignoreCase = true) == true) ||
-                                       (matchedAccount?.accountName?.contains("SIP", ignoreCase = true) == true)
-
-            // Notification intervals requested: 15, 10, 7, 5, and daily after that (which means 4, 3, 2, 1, 0, or overdue/negative days)
-            // Mutual Fund special rule: Trigger exactly one alert 5 days before. No repeated or daily follow-ups.
-            val shouldTrigger = if (isMutualFundReminder) {
-                daysRemaining == 5
-            } else {
-                when {
-                    daysRemaining == 15 -> true
-                    daysRemaining == 10 -> true
-                    daysRemaining == 7 -> true
-                    daysRemaining == 5 -> true
-                    daysRemaining < 5 -> true
-                    else -> false
-                }
-            }
-            
-            if (shouldTrigger) {
-                // Check owner notification constraints
-                var notifyThisDeviceUser = false
-                var relationLabel = ""
-                
-                if (matchedAccount != null) {
-                    val owner = matchedAccount.ownerUserId
-                    if (owner.equals("SHARED", ignoreCase = true)) {
-                        // Shared accounts: remind both at all times
-                        notifyThisDeviceUser = true
-                        relationLabel = "Shared Account"
-                    } else if (owner == currentUid) {
-                        // Current logged in user is the owner: remind at all times
-                        notifyThisDeviceUser = true
-                        relationLabel = "Owner ($currentFirstName)"
-                    } else if (owner == spouseUid) {
-                        // Spouse is the owner. Current is "other user": remind ONLY if <= 5 days remaining
-                        if (daysRemaining <= 5) {
-                            notifyThisDeviceUser = true
-                            relationLabel = "Spouse Account ($spouseFirstName) - Backup Reminder"
-                        }
-                    } else {
-                        // Default fallback logic
-                        notifyThisDeviceUser = true
-                        relationLabel = "Account Remind"
-                    }
-                } else {
-                    // No account linkage, notify both/any (backwards compatibility)
-                    notifyThisDeviceUser = true
-                    relationLabel = "Unlinked Scheduled Payment"
-                }
-
-                if (notifyThisDeviceUser && shouldNotifyToday(context, reminder.id)) {
-                    val title: String
-                    val message: String
-                    val prefix = if (relationLabel.isNotEmpty()) "[$relationLabel] " else ""
-                    
-                    if (daysRemaining < 0) {
-                        val overdueDays = Math.abs(daysRemaining)
-                        title = "🚨 ${prefix}OVERDUE: ${reminder.title}"
-                        message = "Your payment of ₹${reminder.amount} was due $overdueDays days ago! Please pay immediately."
-                    } else if (daysRemaining == 0) {
-                        title = "⏳ ${prefix}DUE TODAY: ${reminder.title}"
-                        message = "Your payment of ₹${reminder.amount} is due today! Avoid late fees."
-                    } else {
-                        title = "🔔 ${prefix}Upcoming Bill: ${reminder.title}"
-                        message = "Your payment of ₹${reminder.amount} is due in $daysRemaining days."
-                    }
-                    
-                    triggerNotificationForReminder(context, reminder.id, title, message)
-                }
-            }
-        }
-    }
-
-    private fun shouldNotifyToday(context: Context, reminderId: String): Boolean {
-        val prefs = context.getSharedPreferences("reminder_notifications_prefs", Context.MODE_PRIVATE)
-        val todayStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-        val lastNotified = prefs.getString("last_notif_$reminderId", "")
-        if (lastNotified == todayStr) {
-            return false // Already notified today
-        }
-        prefs.edit().putString("last_notif_$reminderId", todayStr).apply()
-        return true
-    }
-
-    private fun triggerNotificationForReminder(context: Context, reminderId: String, title: String, message: String) {
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-        val channelId = "reminder_alerts_channel"
-        
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            val channel = android.app.NotificationChannel(
-                channelId,
-                "Payment Reminders",
-                android.app.NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifies when payments and recurring bill items are upcoming or overdue"
-            }
-            notificationManager.createNotificationChannel(channel)
-        }
-        
-        val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            
-        notificationManager.notify(reminderId.hashCode(), builder.build())
+        val cycle = com.example.domain.ReminderRules.latestStatement(withDays, System.currentTimeMillis())
+        return com.example.domain.ReminderRules.statementBalance(account, transactions.value, cycle.statementDate)
     }
 
     // --- BUDGET ACTIONS ---
