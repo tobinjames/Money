@@ -45,9 +45,6 @@ class ExpenseViewModel : ViewModel() {
     val privacyKeywords = FirebaseService.getPrivacyKeywords()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         
-    val manualMappings = FirebaseService.getManualMappings()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
     val budgets = FirebaseService.getBudgets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -707,24 +704,6 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
-    fun addManualMapping(senderId: String, cardDigits: String, accountId: String) {
-        viewModelScope.launch {
-            FirebaseService.addManualMapping(
-                ManualMapping(
-                    senderId = senderId.trim().uppercase(),
-                    cardDigits = cardDigits.trim(),
-                    accountId = accountId
-                )
-            )
-        }
-    }
-
-    fun deleteManualMapping(id: String) {
-        viewModelScope.launch {
-            FirebaseService.deleteManualMapping(id)
-        }
-    }
-    
     fun toggleReminderPaid(reminderId: String) {
         viewModelScope.launch {
             Log.d(TAG, "toggleReminderPaid clicked for reminderId: $reminderId")

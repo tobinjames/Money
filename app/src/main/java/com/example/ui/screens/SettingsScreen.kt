@@ -51,6 +51,7 @@ fun SettingsScreen(
     val partnerBName = user2Name ?: "User 2"
     
     val isFallback by FirebaseService.useFallback.collectAsState()
+    val householdName by FirebaseService.householdName.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
     var showAddSender by remember { mutableStateOf(false) }
@@ -139,6 +140,9 @@ fun SettingsScreen(
             }
         }
 
+        // --- Household membership and partner invite ---
+        item { HouseholdInviteCard() }
+
         // --- 2. FAMILY HOUSEHOLD PROFILE HUB ---
         item {
             Card(
@@ -210,7 +214,7 @@ fun SettingsScreen(
                         // Workspace Tag
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
-                                text = "nestwise-5c65e",
+                                text = householdName ?: "Household",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.outline

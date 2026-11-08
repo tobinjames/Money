@@ -2,13 +2,15 @@ rules_version = '2';
 
 // Security rules for the Family Expense Tracker.
 //
-// Access model: a signed-in user with a verified email is a family member
-// when their (lower-case) email is on the allowlist that the app already
-// checks at sign-in:
-//   - AuthorizedUsers/{email} or whitelisted_userlist/{email}
-//     (a document whose ID is the email, optional isActive/enabled flag), or
-//   - AuthorizedUsers/master_whitelist with an `emails` array.
-// The allowlist itself can only be edited from the Firebase console.
+// Access model: everything lives under households/{householdId}. A signed-in
+// user with a verified email can read and write a household only when their
+// uid is in that household's memberUids.
+//
+//   users/{uid}                 - own profile (which household you belong to)
+//   households/{hid}            - name, ownerUid, memberUids, members
+//   households/{hid}/{coll}/*   - accounts, transactions, budgets, reminders,
+//                                 smsSenders, merchantRules, privacyKeywords
+//   invites/{email}             - lets a member invite a partner by email
 //
 // Deploy with `firebase deploy --only firestore:rules`, or paste this file
 // into Firebase console > Firestore Database > Rules.
@@ -16,67 +18,86 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() {
-      return request.auth != null && request.auth.token.email != null;
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
     }
 
     function myEmail() {
       return request.auth.token.email.lower();
     }
 
-    function verified() {
-      return request.auth.token.email_verified == true;
+    function household(hid) {
+      return get(/databases/$(database)/documents/households/$(hid)).data;
     }
 
-    function activeEntry(coll) {
-      let path = /databases/$(database)/documents/$(coll)/$(myEmail());
-      return exists(path)
-        && get(path).data.get('isActive', get(path).data.get('enabled', true)) != false;
+    function isMember(hid) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/households/$(hid))
+        && request.auth.uid in household(hid).memberUids;
     }
 
-    function inMasterList() {
-      return myEmail() in get(/databases/$(database)/documents/AuthorizedUsers/master_whitelist).data.get('emails', []);
+    // Only the caller's own entry in the members map may change.
+    function onlyOwnMemberEntry() {
+      return request.resource.data.members.diff(resource.data.members)
+        .affectedKeys().hasOnly([request.auth.uid]);
     }
 
-    function isMember() {
-      return signedIn() && verified()
-        && (activeEntry('AuthorizedUsers') || activeEntry('whitelisted_userlist') || inMasterList());
-    }
-
-    // Allowlist: a user may read only their own entry. No client writes.
-    match /AuthorizedUsers/{entry} {
-      allow get: if signedIn()
-        && (entry == myEmail() || (entry == 'master_whitelist' && myEmail() in resource.data.get('emails', [])));
-      allow list: if signedIn() && resource.data.email == myEmail();
-      allow write: if false;
-    }
-    match /whitelisted_userlist/{entry} {
-      allow get: if signedIn()
-        && (entry == myEmail() || (entry == 'master_whitelist' && myEmail() in resource.data.get('emails', [])));
-      allow list: if signedIn() && resource.data.email == myEmail();
-      allow write: if false;
-    }
-
-    // Shared family data.
-    match /Transactions/{id}        { allow read, write: if isMember(); }
-    match /ChartOfAccounts/{id}     { allow read, write: if isMember(); }
-    match /budgets/{id}             { allow read, write: if isMember(); }
-    match /reminders/{id}           { allow read, write: if isMember(); }
-    match /whitelisted_senders/{id} { allow read, write: if isMember(); }
-    match /manual_mappings/{id}     { allow read, write: if isMember(); }
-    match /merchant_rules/{id}      { allow read, write: if isMember(); }
-    match /privacy_keywords/{id}    { allow read, write: if isMember(); }
-    match /family_groups/{id}       { allow read, write: if isMember(); }
-    match /connection_tests/{id}    { allow read, write: if isMember(); }
-
-    // A member can read every profile but only write their own.
     match /users/{uid} {
-      allow read: if isMember();
-      allow write: if isMember() && uid == request.auth.uid;
+      allow read, write: if signedIn() && request.auth.uid == uid;
     }
 
-    // Old raw-SMS telemetry. The app no longer writes it; keep it closed.
-    match /GeminiInteractionLogs/{id} { allow read, write: if false; }
+    match /households/{hid} {
+      allow read: if isMember(hid);
 
-    // Everything else is denied by default.
+      // Create a household with only yourself in it.
+      allow create: if signedIn()
+        && request.resource.data.householdId == hid
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.memberUids == [request.auth.uid]
+        && request.resource.data.members.keys().hasOnly([request.auth.uid]);
+
+      // Members may rename the household and update their own member entry.
+      allow update: if isMember(hid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'members'])
+        && onlyOwnMemberEntry();
+
+      // An invited user may add themselves (and nothing else).
+      allow update: if signedIn()
+        && !(request.auth.uid in resource.data.memberUids)
+        && exists(/databases/$(database)/documents/invites/$(myEmail()))
+        && get(/databases/$(database)/documents/invites/$(myEmail())).data.householdId == hid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberUids', 'members'])
+        && request.resource.data.memberUids.hasAll(resource.data.memberUids)
+        && request.resource.data.memberUids.size() == resource.data.memberUids.size() + 1
+        && request.auth.uid in request.resource.data.memberUids
+        && onlyOwnMemberEntry();
+
+      allow delete: if isMember(hid) && resource.data.ownerUid == request.auth.uid;
+
+      match /{coll}/{docId} {
+        allow read, write: if isMember(hid)
+          && coll in ['accounts', 'transactions', 'budgets', 'reminders',
+                      'smsSenders', 'merchantRules', 'privacyKeywords'];
+      }
+    }
+
+    match /invites/{email} {
+      // The invitee can see and decline their invite; members can see and withdraw it.
+      allow get: if signedIn() && (email == myEmail() || isMember(resource.data.householdId));
+      allow delete: if signedIn() && (email == myEmail() || isMember(resource.data.householdId));
+
+      // A member invites someone into their own household.
+      function validInvite() {
+        return isMember(request.resource.data.householdId)
+          && email == email.lower()
+          && request.resource.data.email == email
+          && request.resource.data.invitedByUid == request.auth.uid
+          && email != myEmail();
+      }
+      allow create: if validInvite();
+      // Re-sending your own household's invite is fine; taking over another household's is not.
+      allow update: if validInvite() && isMember(resource.data.householdId);
+    }
   }
 }

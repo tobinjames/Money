@@ -29,7 +29,10 @@ class SmsBackfillWorker(
         }
 
         try {
-            FirebaseService.ensureCoreDataLoaded()
+            if (!FirebaseService.ensureCoreDataLoaded()) {
+                Log.w("SmsBackfillWorker", "Household data not loaded; will retry.")
+                return if (runAttemptCount < 3) Result.retry() else Result.success()
+            }
             val accountId = inputData.getString("accountId")
             val senderId = inputData.getString("senderId")
             

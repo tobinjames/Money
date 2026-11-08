@@ -67,7 +67,9 @@ class MainActivity : ComponentActivity() {
                 var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
                 var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules", or "settlement"
 
-                if (authState != com.example.data.AuthState.AUTHORIZED) {
+                if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
+                    HouseholdSetupScreen()
+                } else if (authState != com.example.data.AuthState.AUTHORIZED) {
                     AuthScreen(viewModel = viewModel)
                 } else if (activeSubPage == "categories") {
                     CategoryManagementScreen(

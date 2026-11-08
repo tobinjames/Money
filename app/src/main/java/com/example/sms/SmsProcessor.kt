@@ -88,7 +88,11 @@ object SmsProcessor {
 
         // Make sure accounts and transactions come from Firestore (server or offline cache), not the
         // still-empty in-memory lists of a freshly started background process.
-        FirebaseService.ensureCoreDataLoaded()
+        // Signed in but no household yet (or data not reachable): defer, same as signed out.
+        if (!FirebaseService.ensureCoreDataLoaded()) {
+            Log.w(TAG, "Household data not loaded; deferring SMS processing.")
+            return false
+        }
 
         // Pre-filter first: most SMS are not from a bank, and this needs only two small lists.
         val whitelisted = FirebaseService.getWhitelistedSenders().first()

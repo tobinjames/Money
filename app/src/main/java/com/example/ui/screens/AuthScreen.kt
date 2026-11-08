@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
@@ -28,14 +27,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
 import com.example.data.AuthState
-import com.example.data.EmailVerificationRequiredException
 import com.example.data.FirebaseService
 import com.example.ui.viewmodel.ExpenseViewModel
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -53,10 +49,6 @@ fun AuthScreen(
     val coroutineScope = rememberCoroutineScope()
     val authState by FirebaseService.authStateVal.collectAsState()
 
-    var isRegisterMode by remember { mutableStateOf(false) }
-    var emailInput by remember { mutableStateOf("") }
-    var passwordInput by remember { mutableStateOf("") }
-    var displayNameInput by remember { mutableStateOf("") }
     var authLoading by remember { mutableStateOf(false) }
     var authErrorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -68,7 +60,7 @@ fun AuthScreen(
             val account = task.getResult(ApiException::class.java)
             val idToken = account?.idToken
             if (account != null && idToken.isNullOrBlank()) {
-                authErrorMessage = "Google Sign-In: no ID token returned. Check GOOGLE_WEB_CLIENT_ID and the app's SHA-1 in Firebase."
+                authErrorMessage = "Google Sign-In: no ID token returned. Check the app's SHA-1 fingerprint in Firebase project settings."
             } else if (account != null && idToken != null) {
                 authLoading = true
                 authErrorMessage = null
@@ -192,7 +184,7 @@ fun AuthScreen(
                                 Spacer(modifier = Modifier.height(16.dp))
 
                                 Text(
-                                    text = "Access Denied",
+                                    text = "Sign-in failed",
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.error
@@ -201,7 +193,7 @@ fun AuthScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
 
                                 Text(
-                                    text = authErrorMessage ?: "Your email is not whitelisted by the family administrator. Please contact your household owner to grant email access.",
+                                    text = authErrorMessage ?: "Sign-in did not complete. Check your connection and try again.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                     textAlign = TextAlign.Center
@@ -238,49 +230,18 @@ fun AuthScreen(
                                     .padding(24.dp)
                             ) {
                                 Text(
-                                    text = if (isRegisterMode) "Create Authorized Account" else "Authorized Login",
+                                    text = "Sign in",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                                 Spacer(modifier = Modifier.height(16.dp))
 
-                                if (isRegisterMode) {
-                                    OutlinedTextField(
-                                        value = displayNameInput,
-                                        onValueChange = { displayNameInput = it },
-                                        label = { Text("Your First Name") },
-                                        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
-                                        modifier = Modifier.fillMaxWidth().testTag("auth_display_name_input"),
-                                        shape = RoundedCornerShape(12.dp),
-                                        singleLine = true
-                                    )
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                }
-
-                                OutlinedTextField(
-                                    value = emailInput,
-                                    onValueChange = { emailInput = it },
-                                    label = { Text("Whitelisted Email Address") },
-                                    leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
-                                    modifier = Modifier.fillMaxWidth().testTag("auth_email_input"),
-                                    shape = RoundedCornerShape(12.dp),
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                                    singleLine = true
+                                Text(
+                                    text = "Sign in with the Google account your household uses.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                Spacer(modifier = Modifier.height(12.dp))
-
-                                OutlinedTextField(
-                                    value = passwordInput,
-                                    onValueChange = { passwordInput = it },
-                                    label = { Text("Password") },
-                                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
-                                    modifier = Modifier.fillMaxWidth().testTag("auth_password_input"),
-                                    shape = RoundedCornerShape(12.dp),
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    singleLine = true
-                                )
-
                                 authErrorMessage?.let { errMsg ->
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
@@ -306,9 +267,14 @@ fun AuthScreen(
                                     onClick = {
                                         authErrorMessage = null
                                         try {
+                                            // google-services.json generates default_web_client_id once Google sign-in is enabled
+                                            // in Firebase; GOOGLE_WEB_CLIENT_ID in .env is only an override.
+                                            val generatedId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+                                                .takeIf { it != 0 }?.let { context.getString(it) }
                                             val webClientId = BuildConfig.GOOGLE_WEB_CLIENT_ID
+                                                .takeIf { it.isNotBlank() && it != "YOUR_WEB_CLIENT_ID" } ?: generatedId ?: ""
                                             if (webClientId.isBlank() || webClientId == "YOUR_WEB_CLIENT_ID") {
-                                                authErrorMessage = "Google Sign-In is not configured: set GOOGLE_WEB_CLIENT_ID in .env (Firebase console > Authentication > Google > Web client ID)."
+                                                authErrorMessage = "Google Sign-In is not configured: enable Google in Firebase Authentication, then download google-services.json into app/ again."
                                                 return@Button
                                             }
                                             val googleSignInOptions = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
@@ -334,57 +300,6 @@ fun AuthScreen(
                                     Text("Sign-in with Google SSO", fontWeight = FontWeight.Bold)
                                 }
 
-                                Spacer(modifier = Modifier.height(16.dp))
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                                Spacer(modifier = Modifier.height(16.dp))
-
-                                // Email/Password Alternative Option
-                                OutlinedButton(
-                                    onClick = {
-                                        if (emailInput.trim().isEmpty() || passwordInput.trim().isEmpty() || (isRegisterMode && displayNameInput.trim().isEmpty())) {
-                                            authErrorMessage = "All fields are required for email authorization."
-                                            return@OutlinedButton
-                                        }
-                                        authLoading = true
-                                        authErrorMessage = null
-                                        coroutineScope.launch {
-                                            try {
-                                                if (isRegisterMode) {
-                                                    FirebaseService.signUpWithEmail(emailInput.trim(), passwordInput, displayNameInput.trim())
-                                                    Toast.makeText(context, "Account Created Successfully!", Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    FirebaseService.signInWithEmail(emailInput.trim(), passwordInput)
-                                                    Toast.makeText(context, "Welcome back!", Toast.LENGTH_SHORT).show()
-                                                }
-                                            } catch (e: Exception) {
-                                                authErrorMessage = e.message ?: "Authentication failed."
-                                                if (e !is EmailVerificationRequiredException) {
-                                                    FirebaseService.authStateVal.value = AuthState.DENIED
-                                                }
-                                            } finally {
-                                                authLoading = false
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth().testTag("auth_submit_btn"),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Text(if (isRegisterMode) "Register via Email" else "Login via Email")
-                                }
-
-                                Spacer(modifier = Modifier.height(12.dp))
-
-                                TextButton(
-                                    onClick = {
-                                        isRegisterMode = !isRegisterMode
-                                        authErrorMessage = null
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = if (isRegisterMode) "Already have an account? Log In" else "Create collaborative partner account"
-                                    )
-                                }
                                 }
                             }
                         }

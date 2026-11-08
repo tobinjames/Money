@@ -16,3 +16,6 @@
 local.properties
 .env
 debug.keystore
+
+# Firebase config for your own project; download from Firebase console > Project settings.
+app/google-services.json

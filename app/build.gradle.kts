@@ -4,6 +4,8 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
+  // Reads app/google-services.json (download it from your Firebase project; it is not committed).
+  alias(libs.plugins.google.services)
 }
 
 android {
@@ -98,6 +100,8 @@ dependencies {
   implementation(libs.firebase.auth)
   implementation(libs.play.services.auth)
   implementation(libs.firebase.firestore)
+  // App Check with per-phone debug tokens (the app is sideloaded, not on Google Play).
+  implementation(libs.firebase.appcheck.debug)
   implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
