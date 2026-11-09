@@ -86,7 +86,7 @@ fun AccountsOverviewCard(
             groups.forEach { (name, list) -> AccountGroup(name, list, ownerLabel) }
             if (onOpenNetWorth != null) {
                 TextButton(onClick = onOpenNetWorth, contentPadding = PaddingValues(0.dp), modifier = Modifier.padding(top = 4.dp)) {
-                    Text("Net worth, investments & loans →", style = MaterialTheme.typography.labelMedium)
+                    Text("Net worth: trend, split & investments →", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -144,45 +144,6 @@ private fun AccountGroup(name: String, list: List<Account>, ownerLabel: (Account
     if (list.size > shown.size || showAll && list.size > ROWS_BEFORE_MORE + 1) {
         TextButton(onClick = { showAll = !showAll }, contentPadding = PaddingValues(0.dp)) {
             Text(if (showAll) "Show less" else "Show ${list.size - shown.size} more", style = MaterialTheme.typography.labelMedium)
-        }
-    }
-}
-
-/** Net worth for you and for the family: every account, including investments and loans. */
-@Composable
-fun NetWorthScreen(viewModel: com.example.ui.viewmodel.ExpenseViewModel, onBackClick: () -> Unit) {
-    androidx.activity.compose.BackHandler { onBackClick() }
-    val accounts by viewModel.accounts.collectAsState()
-    val myUid by viewModel.currentUserUid.collectAsState()
-    val myName = viewModel.currentUserFirstName.collectAsState().value ?: "You"
-    val partnerName = viewModel.spouseUserFirstName.collectAsState().value ?: "Partner"
-    var family by rememberSaveable { mutableStateOf(false) }
-    val ownerLabel: (Account) -> String = { acc ->
-        when {
-            acc.ownerUserId.equals(FreeToSpendRules.SHARED, true) || acc.ownerUserId.isBlank() -> "Joint"
-            acc.ownerUserId == myUid -> myName
-            else -> partnerName
-        }
-    }
-    val shown = if (family || myUid == null) accounts else accounts.filter { FreeToSpendRules.countsFor(it.ownerUserId, myUid!!) }
-
-    androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
-                IconButton(onClick = onBackClick) { Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back") }
-                Text("Net worth", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = !family, onClick = { family = false }, label = { Text("Yours (with joint)") })
-                FilterChip(selected = family, onClick = { family = true }, label = { Text("Whole family") })
-            }
-        }
-        item {
-            AccountsOverviewCard(
-                title = if (family) "Family net worth" else "Your net worth",
-                accounts = shown,
-                ownerLabel = ownerLabel
-            )
         }
     }
 }

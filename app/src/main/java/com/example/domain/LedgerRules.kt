@@ -81,7 +81,7 @@ object LedgerRules {
         return accounts.associate { it.accountId to fromSums(it, debits[it.accountId] ?: 0.0, credits[it.accountId] ?: 0.0) }
     }
 
-    private fun fromSums(account: Account, debitSum: Double, creditSum: Double): Double {
+    internal fun fromSums(account: Account, debitSum: Double, creditSum: Double): Double {
         val isAssetOrLiability = account.accountType == "ASSET" || account.accountType == "LIABILITY"
         val opening = if (isAssetOrLiability) account.openingBalance else 0.0
         return when {
