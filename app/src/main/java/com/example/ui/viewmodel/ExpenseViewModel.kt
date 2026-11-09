@@ -48,6 +48,7 @@ class ExpenseViewModel : ViewModel() {
     val budgets = FirebaseService.getBudgets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val reserves = FirebaseService.getReserves()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _toastEvent = MutableSharedFlow<String>()
@@ -118,7 +119,7 @@ class ExpenseViewModel : ViewModel() {
             ViewFilter.User1 -> list.filter { isUser1Strict(it.ownerUserId) }
             ViewFilter.User2 -> list.filter { isUser2Strict(it.ownerUserId) }
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val filteredTransactions = combine(transactions, accounts, currentFilter, scopeFilter, currentUserUid) { txList, accList, ownerFilter, scope, myUid ->
         val user1Uid = myUid
@@ -185,7 +186,7 @@ class ExpenseViewModel : ViewModel() {
             val matchesScope = scope == null || tx.scope == scope
             matchesOwner && matchesScope
         }.sortedByDescending { it.timestamp }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Net Assets/Liabilities Summary: Refactored to support AccountMainCategory & AccountClass (Features 1 & 2)
     val netFinancialCalculator = combine(filteredAccounts, accounts) { filtered, all ->
@@ -234,7 +235,70 @@ class ExpenseViewModel : ViewModel() {
             loanOutstanding = loanLiabilities,
             familyNetWorth = familyNetWorthVal
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NetFinancials())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NetFinancials())
+
+    // ---------------------------------------------------------------------------------------
+    // Free to spend (personal) and reserves (shared)
+    // ---------------------------------------------------------------------------------------
+
+    /** Day of the month this person's salary arrives, 0 when not set. Kept on this phone. */
+    val salaryDay = MutableStateFlow(0)
+    val lowBalanceThreshold = MutableStateFlow(0.0)
+
+    fun loadMoneyPrefs(context: Context) {
+        salaryDay.value = com.example.reminders.AlertPrefs.salaryDay(context)
+        lowBalanceThreshold.value = com.example.reminders.AlertPrefs.lowBalanceThreshold(context)
+    }
+
+    fun setSalaryDay(context: Context, day: Int) {
+        com.example.reminders.AlertPrefs.setSalaryDay(context, day)
+        salaryDay.value = day
+    }
+
+    fun setLowBalanceThreshold(context: Context, amount: Double) {
+        com.example.reminders.AlertPrefs.setLowBalanceThreshold(context, amount)
+        lowBalanceThreshold.value = amount
+    }
+
+    private val freeToSpendInputs = combine(accounts, transactions, reminders, reserves) { a, t, r, s -> listOf(a, t, r, s) }
+
+    val freeToSpend: StateFlow<com.example.domain.FreeToSpendRules.Breakdown?> =
+        combine(freeToSpendInputs, salaryDay, currentUserUid) { inputs, day, uid ->
+            if (uid == null) return@combine null
+            @Suppress("UNCHECKED_CAST")
+            com.example.domain.FreeToSpendRules.compute(
+                myUid = uid,
+                accounts = inputs[0] as List<Account>,
+                txs = inputs[1] as List<Transaction>,
+                reminders = inputs[2] as List<Reminder>,
+                reserves = inputs[3] as List<Reserve>,
+                salaryDay = day,
+                now = System.currentTimeMillis()
+            )
+        }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** New reserves start counting monthly top-ups from next month; the opening amount is this month's. */
+    fun saveReserve(reserve: Reserve) {
+        viewModelScope.launch {
+            val isNew = reserves.value.none { it.id == reserve.id }
+            val toSave = if (isNew) reserve.copy(
+                createdByUserId = FirebaseService.getCurrentUserId(),
+                lastContributionMonth = com.example.domain.FreeToSpendRules.monthKey(System.currentTimeMillis())
+            ) else reserve
+            FirebaseService.saveReserve(toSave)
+        }
+    }
+
+    /** Money taken out of a reserve once it is spent on what it was for. */
+    fun useReserve(reserve: Reserve, amount: Double) {
+        viewModelScope.launch {
+            FirebaseService.saveReserve(reserve.copy(amount = (reserve.amount - amount).coerceAtLeast(0.0)))
+        }
+    }
+
+    fun deleteReserve(id: String) {
+        viewModelScope.launch { FirebaseService.deleteReserve(id) }
+    }
 
     // Auto-category helpers
     fun getSuggestedCategoryForVendor(vendorName: String): String? {
@@ -884,17 +948,6 @@ class ExpenseViewModel : ViewModel() {
     fun deleteMerchantRule(ruleId: String) {
         viewModelScope.launch {
             FirebaseService.deleteMerchantRule(ruleId)
-        }
-    }
-
-    fun deleteAllTransactions(onComplete: (Boolean, String?) -> Unit) {
-        viewModelScope.launch {
-            try {
-                FirebaseService.deleteAllTransactions()
-                onComplete(true, null)
-            } catch (e: Exception) {
-                onComplete(false, e.localizedMessage ?: e.message)
-            }
         }
     }
 

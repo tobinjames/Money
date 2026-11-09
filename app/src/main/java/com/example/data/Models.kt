@@ -220,3 +220,25 @@ data class PrivacyKeyword(
     val id: String = java.util.UUID.randomUUID().toString(),
     val keyword: String = ""
 )
+
+/**
+ * Money set aside for something coming up (insurance, school fees, a trip). Shared by the
+ * household, and kept in one account: it lowers Free to spend for whoever owns that account
+ * (both partners for a joint account). The money stays in the bank; this only earmarks it.
+ */
+data class Reserve(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    // What is set aside right now.
+    val amount: Double = 0.0,
+    // Goal amount, 0 when there is none. Monthly top-ups stop here.
+    val target: Double = 0.0,
+    // When the money is needed, 0 when there is no date.
+    val targetDate: Long = 0L,
+    // Added automatically at the start of each month, 0 for none.
+    val monthlyContribution: Double = 0.0,
+    // The month ("yyyy_MM") the last automatic top-up was for.
+    val lastContributionMonth: String = "",
+    val keptInAccountId: String = "",
+    val createdByUserId: String = ""
+)

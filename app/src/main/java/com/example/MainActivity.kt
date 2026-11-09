@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
 
         // Load the user's preference for automatic SMS scanning
         viewModel.loadSmsAutoSyncSetting(applicationContext)
+        viewModel.loadMoneyPrefs(applicationContext)
 
         // Request SMS permissions natively for maximum security on startup
         requestSmsPermissions()
@@ -71,7 +72,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
-                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules", or "settlement"
+                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules" or "reserves"
 
                 if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
                     HouseholdSetupScreen()
@@ -82,13 +83,18 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
-                } else if (activeSubPage == "rules") {
-                    SmartRulesScreen(
+                } else if (activeSubPage == "networth") {
+                    NetWorthScreen(
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
-                } else if (activeSubPage == "settlement") {
-                    FamilySettlementDashboard(
+                } else if (activeSubPage == "reserves") {
+                    ReservesScreen(
+                        viewModel = viewModel,
+                        onBackClick = { activeSubPage = null }
+                    )
+                } else if (activeSubPage == "rules") {
+                    SmartRulesScreen(
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
@@ -142,6 +148,8 @@ class MainActivity : ComponentActivity() {
                                     DashboardScreen(
                                         viewModel = viewModel,
                                         onNavigateTransactions = { selectedTab = ScreenTab.Transactions },
+                                        onOpenReserves = { activeSubPage = "reserves" },
+                                        onOpenNetWorth = { activeSubPage = "networth" },
                                         modifier = contentModifier
                                     )
                                 }
@@ -168,7 +176,7 @@ class MainActivity : ComponentActivity() {
                                         viewModel = viewModel,
                                         onNavigateCategoryManagement = { activeSubPage = "categories" },
                                         onNavigateSmartRules = { activeSubPage = "rules" },
-                                        onNavigateFamilySettlement = { activeSubPage = "settlement" },
+                                        onNavigateReserves = { activeSubPage = "reserves" },
                                         modifier = contentModifier
                                     )
                                 }

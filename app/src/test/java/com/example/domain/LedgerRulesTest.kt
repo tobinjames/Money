@@ -122,4 +122,21 @@ class LedgerRulesTest {
         val spent = LedgerRules.monthlySpent(budget, txs, time(2026, 11, 4)) { Pair("", it) }
         assertEquals(400.0, spent, 0.001)
     }
+
+    @Test fun `balances in one pass match balance per account`() {
+        val bank = com.example.data.Account(accountId = "b", accountType = "ASSET", openingBalance = 1000.0, asOfDate = 0L)
+        val card = com.example.data.Account(accountId = "c", accountType = "LIABILITY", openingBalance = 50.0, asOfDate = 0L)
+        val loan = com.example.data.Account(accountId = "l", accountType = "LIABILITY", customMainCategory = "Loans", openingBalance = -5000.0, asOfDate = 0L)
+        val txs = listOf(
+            LedgerRules.toLedger(com.example.data.Transaction(amount = 200.0, type = com.example.data.TransactionType.EXPENSE, category = "Food", accountId = "c")),
+            LedgerRules.toLedger(com.example.data.Transaction(amount = 120.0, type = com.example.data.TransactionType.TRANSFER, accountId = "b", targetAccountId = "c")),
+            LedgerRules.toLedger(com.example.data.Transaction(amount = 500.0, type = com.example.data.TransactionType.TRANSFER, accountId = "b", targetAccountId = "l")),
+            LedgerRules.toLedger(com.example.data.Transaction(amount = 999.0, type = com.example.data.TransactionType.EXPENSE, category = "Food", accountId = "b", isIgnored = true))
+        )
+        val all = LedgerRules.balances(listOf(bank, card, loan), txs)
+        listOf(bank, card, loan).forEach { org.junit.Assert.assertEquals(LedgerRules.balance(it, txs), all[it.accountId]!!, 0.001) }
+        org.junit.Assert.assertEquals(380.0, all["b"]!!, 0.001)
+        org.junit.Assert.assertEquals(130.0, all["c"]!!, 0.001)
+        org.junit.Assert.assertEquals(-4500.0, all["l"]!!, 0.001)
+    }
 }

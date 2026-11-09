@@ -96,9 +96,7 @@ class SmsBackfillWorker(
                     val dateMillis = cursor.getLong(2)
 
                     // Sender match: check if matches targetSenders
-                    val isMatchedSender = targetSenders.any { s ->
-                        sender.lowercase().contains(s.lowercase().trim())
-                    }
+                    val isMatchedSender = targetSenders.any { s -> com.example.domain.SenderRules.matches(sender, s) }
                     if (!isMatchedSender) continue
 
                     // Content privacy check

@@ -60,14 +60,16 @@ import android.widget.Toast
 fun DashboardScreen(
     viewModel: ExpenseViewModel,
     onNavigateTransactions: () -> Unit,
+    onOpenReserves: () -> Unit,
+    onOpenNetWorth: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     
     val accountsState by viewModel.filteredAccounts.collectAsState()
+    val allAccountsState by viewModel.accounts.collectAsState()
     val transactionsState by viewModel.filteredTransactions.collectAsState()
-    val financials3State by viewModel.netFinancialCalculator.collectAsState()
     val categoriesState by viewModel.categories.collectAsState(initial = emptyList())
     
     val activeFilter by viewModel.currentFilter.collectAsState()
@@ -91,7 +93,7 @@ fun DashboardScreen(
     val smsReceivePermission = rememberPermissionState(permission = Manifest.permission.RECEIVE_SMS)
     
     // Categorize spend types for doughnut display: current month only
-    val categoryTotals = remember(transactionsState, activeScope) {
+    val categoryTotals = rememberInBackground(emptyMap<String, Double>(), transactionsState, activeScope) {
         val totals = mutableMapOf<String, Double>()
         val calCurrent = Calendar.getInstance()
         val currentYear = calCurrent.get(Calendar.YEAR)
@@ -527,359 +529,28 @@ fun DashboardScreen(
             }
         }
 
-        // ACCOUNT SUMMARY METRICS: Net Liquid Assets & Liabilities
+        // FREE TO SPEND: personal, until the next salary
         item {
-            Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                val isCombined = activeFilter == ViewFilter.Combined
-                val user1Id = currentUserUid ?: "user_1"
-                val user2Id = viewModel.spouseUserUid.value ?: "user_2"
-                
-                val displayedNetWorth: Double
-                val netWorthTitle: String
-                
-                if (isCombined) {
-                    displayedNetWorth = financials3State.familyNetWorth
-                    netWorthTitle = "JOINT FAMILY NET WORTH"
-                } else {
-                    val targetUid = if (activeFilter == ViewFilter.User1) user1Id else user2Id
-                    val targetName = if (activeFilter == ViewFilter.User1) myNameStr else spouseNameStr
-                    // Calculate only that specific user's assets minus liabilities
-                    val userSpecificAccounts = accountsState
-                    val assetsSum = userSpecificAccounts.filter { it.accountClass == "ASSET" }.sumOf { it.balance }
-                    val liabilitiesSum = userSpecificAccounts.filter { it.accountClass == "LIABILITY" }.sumOf { Math.abs(it.balance) }
-                    displayedNetWorth = assetsSum - liabilitiesSum
-                    netWorthTitle = "${targetName.uppercase()}'S INDIVIDUAL NET WORTH"
-                }
-
-                // Beautiful, high-contrast, structured Net Worth card
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = netWorthTitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            letterSpacing = 1.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = formatAmount(displayedNetWorth),
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.testTag("net_worth_val")
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Globally Syncing Real-Time Assets & Liabilities",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
-                        )
-                    }
-                }
-
-                if (isCombined) {
-                    // --- COMBINED VIEW TAB ---
-                    Text(
-                        text = "Master Family Summaries",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    
-                    val totalBankAccountsBalance = accountsState.filter { 
-                        it.mainCategory == "Bank Accounts" || it.mainCategory == "Cash" 
-                    }.sumOf { it.balance }
-                    
-                    val totalCreditCardDues = accountsState.filter { 
-                        it.mainCategory == "Credit Cards" 
-                    }.sumOf { Math.abs(it.balance) }
-                    
-                    val jointAccounts = accountsState.filter { it.ownerUserId.equals("SHARED", ignoreCase = true) }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Total Bank Accounts (Assets)
-                        Card(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(115.dp)
-                                .testTag("total_bank_accounts_summary_card"),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(14.dp),
-                                verticalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Icon(Icons.Default.AccountBalance, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
-                                Column {
-                                    Text("Total Bank Balance", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
-                                    Text(formatAmount(totalBankAccountsBalance), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                        
-                        // Total Credit Cards (Liabilities)
-                        Card(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(115.dp)
-                                .testTag("total_credit_cards_summary_card"),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.2f))
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(14.dp),
-                                verticalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Icon(Icons.Default.CreditCard, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(24.dp))
-                                Column {
-                                    Text("Total Credit Card Dues", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
-                                    Text(formatAmount(totalCreditCardDues), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (jointAccounts.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Joint & Shared Bank Accounts",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                        jointAccounts.forEach { account ->
-                            AccountNumberCard(account = account)
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "No joint accounts found.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                    }
-                } else {
-                    // --- PERSONAL VIEW TAB ---
-                    // 1. Net Liquid Funds balances (savings & cash - credit card dues)
-                    val liquidFundsVal = financials3State.liquidFunds
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp)
-                            .testTag("net_liquid_funds_card"),
-                        shape = RoundedCornerShape(18.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.25f)
-                        ),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Info,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.secondary,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text(
-                                        text = "Net Liquid Funds",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = "Cash & Savings minus Credit Cards",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            Text(
-                                text = formatAmount(liquidFundsVal),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = if (liquidFundsVal < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
-                            )
-                        }
-                    }
-
-                    // 2. Individual account balances (Bank accounts, cash, and credit cards)
-                    Text(
-                        text = "Your Accounts & Credit Card Balances",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    
-                    val personalAccounts = accountsState.filter {
-                        it.mainCategory == "Bank Accounts" || it.mainCategory == "Cash" || it.mainCategory == "Credit Cards"
-                    }
-                    
-                    if (personalAccounts.isEmpty()) {
-                        Text(
-                            text = "No personal accounts found registered under this profile.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-                    } else {
-                        personalAccounts.forEach { account ->
-                            AccountNumberCard(account = account)
-                        }
-                    }
-                }
-            }
+            FreeToSpendCard(viewModel = viewModel, onOpenReserves = onOpenReserves)
         }
 
-        // INVESTMENTS SECTION (Fixed Deposits & Mutual Funds displayed separately)
+        // ACCOUNTS: your bank & cash and credit cards (joint ones too); net worth has its own screen
         item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "Investments & Multi-Funds",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Separate from monthly cash flow",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            text = formatAmount(financials3State.totalInvestments),
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+            AccountsOverviewCard(
+                title = "In hand minus card dues",
+                accounts = allAccountsState.filter { acc ->
+                    currentUserUid?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: true
+                },
+                ownerLabel = { acc ->
+                    when {
+                        acc.ownerUserId.equals("SHARED", true) || acc.ownerUserId.isBlank() -> "Joint"
+                        acc.ownerUserId == currentUserUid -> myNameStr
+                        else -> spouseNameStr
                     }
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        // FDs
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(8.dp).background(Color(0xFFAB47BC), CircleShape))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Fixed Deposits", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Text(
-                                text = formatAmount(financials3State.fixedDeposits),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(start = 14.dp, top = 2.dp)
-                            )
-                        }
-                        
-                        Divider(modifier = Modifier.height(40.dp).width(1.dp).align(Alignment.CenterVertically))
-                        
-                        // MFs
-                        Column(modifier = Modifier.weight(1f).padding(start = 16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(8.dp).background(Color(0xFFFF7043), CircleShape))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Mutual Funds", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Text(
-                                text = formatAmount(financials3State.mutualFunds),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(start = 14.dp, top = 2.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        
-        // LOAN LIABILITIES ONBOARDING / SECTION
-        if (financials3State.loanOutstanding != 0.0) {
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(20.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(40.dp)
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Active Loan Liabilities", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Text("Outstanding balance representing debt", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Text(
-                            text = formatAmount(financials3State.loanOutstanding),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-            }
+                },
+                currentOnly = true,
+                onOpenNetWorth = onOpenNetWorth
+            )
         }
 
         // MULTI-TOGGLES FILTERS FOR GRAPH (Who Paid & Scope)
@@ -1835,102 +1506,6 @@ fun DashboardScreen(
                 }
             }
         )
-    }
-}
-
-@Composable
-fun AccountNumberCard(account: Account) {
-    val last4 = remember(account.id, account.name, account.lastFourDigits) {
-        if (account.lastFourDigits.isNotBlank()) {
-            account.lastFourDigits
-        } else {
-            val digits = account.name.filter { it.isDigit() }
-            if (digits.length >= 4) digits.takeLast(4) else "4812"
-        }
-    }
-    
-    val bankName = account.name.split("(").first().trim()
-    
-    val isAsset = account.accountClass == "ASSET"
-    val containerBg = if (isAsset) Color(0xFFF5F6FF) else Color(0xFFFFF5F5)
-    val borderStrokeColor = if (isAsset) Color(0xFFD6E4FF) else Color(0xFFFFD6D6)
-    val textColor = if (isAsset) Color(0xFF1E293B) else Color(0xFF880E4F)
-    val labelColor = if (isAsset) Color(0xFF4F46E5) else Color(0xFFC2185B)
-    
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .testTag("account_number_card_${account.id}"),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = containerBg),
-        border = BorderStroke(1.dp, borderStrokeColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = labelColor.copy(alpha = 0.12f),
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = if (account.mainCategory == "Credit Cards") Icons.Default.CreditCard else Icons.Default.AccountBalance,
-                            contentDescription = null,
-                            tint = labelColor,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-                
-                Column {
-                    Text(
-                        text = bankName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = textColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = if (account.mainCategory == "Credit Cards") "Card  •••• $last4" else "Savings  •••• $last4",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = labelColor.copy(alpha = 0.8f)
-                    )
-                }
-            }
-            
-            Column(horizontalAlignment = Alignment.End) {
-                val displayBal = if (account.mainCategory == "Credit Cards") {
-                    Math.abs(account.balance)
-                } else {
-                    account.balance
-                }
-                Text(
-                    text = formatAmount(displayBal),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = if (displayBal < 0) MaterialTheme.colorScheme.error else textColor
-                )
-                Text(
-                    text = if (account.mainCategory == "Credit Cards") "OUTSTANDING" else "BALANCE",
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, letterSpacing = 0.5.sp),
-                    fontWeight = FontWeight.Bold,
-                    color = labelColor.copy(alpha = 0.6f)
-                )
-            }
-        }
     }
 }
 

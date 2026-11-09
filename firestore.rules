@@ -8,9 +8,12 @@ rules_version = '2';
 //
 //   users/{uid}                 - own profile (which household you belong to)
 //   households/{hid}            - name, ownerUid, memberUids, members
-//   households/{hid}/{coll}/*   - accounts, transactions, budgets, reminders,
+//   households/{hid}/{coll}/*   - accounts, transactions, budgets, reminders, reserves,
 //                                 smsSenders, merchantRules, privacyKeywords
 //   invites/{email}             - lets a member invite a partner by email
+//   config/access               - { emails: [...] }: the only Google accounts that may
+//                                 create or join a household. Edit it in the Firebase
+//                                 console (apps can't read or change it). Lower-case.
 //
 // Deploy with `firebase deploy --only firestore:rules`, or paste this file
 // into Firebase console > Firestore Database > Rules.
@@ -25,6 +28,12 @@ service cloud.firestore {
 
     function myEmail() {
       return request.auth.token.email.lower();
+    }
+
+    // Only the family's own accounts, listed in config/access, may start or join a household.
+    function allowedEmail(email) {
+      return exists(/databases/$(database)/documents/config/access)
+        && email in get(/databases/$(database)/documents/config/access).data.emails;
     }
 
     function household(hid) {
@@ -52,6 +61,7 @@ service cloud.firestore {
 
       // Create a household with only yourself in it.
       allow create: if signedIn()
+        && allowedEmail(myEmail())
         && request.resource.data.householdId == hid
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.memberUids == [request.auth.uid]
@@ -64,6 +74,7 @@ service cloud.firestore {
 
       // An invited user may add themselves (and nothing else).
       allow update: if signedIn()
+        && allowedEmail(myEmail())
         && !(request.auth.uid in resource.data.memberUids)
         && exists(/databases/$(database)/documents/invites/$(myEmail()))
         && get(/databases/$(database)/documents/invites/$(myEmail())).data.householdId == hid
@@ -77,9 +88,14 @@ service cloud.firestore {
 
       match /{coll}/{docId} {
         allow read, write: if isMember(hid)
-          && coll in ['accounts', 'transactions', 'budgets', 'reminders',
+          && coll in ['accounts', 'transactions', 'budgets', 'reminders', 'reserves',
                       'smsSenders', 'merchantRules', 'privacyKeywords'];
       }
+    }
+
+    // Set by hand in the Firebase console only.
+    match /config/{doc} {
+      allow read, write: if false;
     }
 
     match /invites/{email} {
@@ -93,7 +109,8 @@ service cloud.firestore {
           && email == email.lower()
           && request.resource.data.email == email
           && request.resource.data.invitedByUid == request.auth.uid
-          && email != myEmail();
+          && email != myEmail()
+          && allowedEmail(email);
       }
       allow create: if validInvite();
       // Re-sending your own household's invite is fine; taking over another household's is not.

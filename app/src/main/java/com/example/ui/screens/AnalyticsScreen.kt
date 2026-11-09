@@ -141,7 +141,7 @@ fun AnalyticsScreen(
         { bgt: Budget -> com.example.domain.BudgetRules.spent(bgt, transactionsState, categoriesState, System.currentTimeMillis()) }
     }
 
-    val dynamicMonthlySpentMap = remember(transactionsState, currentMonthStart) {
+    val dynamicMonthlySpentMap = rememberInBackground(emptyMap<String, Double>(), transactionsState, currentMonthStart) {
         transactionsState
             .filter { it.status == TransactionStatus.CONFIRMED && !it.isIgnored && it.type == TransactionType.EXPENSE && it.timestamp >= currentMonthStart }
             .groupBy { it.category }
@@ -149,7 +149,7 @@ fun AnalyticsScreen(
     }
 
     // 1. Filter transactions by user tab selection for Analytics Insights
-    val userFilteredTransactions = remember(transactionsState, selectedUserTab, name1, name2) {
+    val userFilteredTransactions = rememberInBackground(emptyList<Transaction>(), transactionsState, selectedUserTab, name1, name2) {
         transactionsState.filter { tx ->
             if (tx.status != TransactionStatus.CONFIRMED) return@filter false
             val curId = viewModel.currentUserUid.value
@@ -244,7 +244,7 @@ fun AnalyticsScreen(
     }
 
     // 5. Multi-Month Trend Summaries (Last 6 Months) for MoM & Cash Flow
-    val monthlySummaries = remember(transactionsState, name1, name2) {
+    val monthlySummaries = rememberInBackground(emptyList<MonthlyMetric>(), transactionsState, name1, name2) {
         val result = mutableListOf<MonthlyMetric>()
         val cal = Calendar.getInstance()
         cal.set(Calendar.DAY_OF_MONTH, 1)
@@ -351,7 +351,7 @@ fun AnalyticsScreen(
     }
 
     // 6. Trip & Event Sub-Ledger Summaries (Feature 5)
-    val tagSubLedgerSummaries = remember(transactionsState, name1, name2) {
+    val tagSubLedgerSummaries = rememberInBackground(emptyList<TagSubLedgerSummary>(), transactionsState, name1, name2) {
         val curId = viewModel.currentUserUid.value
         val spId = viewModel.spouseUserUid.value
         
@@ -2777,4 +2777,17 @@ fun SubLedgerCard(
             }
         }
     }
+}
+
+/**
+ * Like `remember(keys) { calc() }`, but the work runs on a background thread so drawing and
+ * scrolling stay smooth while years of transactions are summed. Keeps the last result while a
+ * new one is worked out.
+ */
+@Composable
+internal fun <T> rememberInBackground(initial: T, vararg keys: Any?, calc: () -> T): T {
+    val state = produceState(initial, *keys) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { calc() }
+    }
+    return state.value
 }

@@ -15,6 +15,10 @@ await env.withSecurityRulesDisabled(async c => {
   await setDoc(doc(db, 'households', 'h2'), { householdId: 'h2', name: 'Other', ownerUid: 'u5', memberUids: ['u5'], members: { u5: { firstName: 'Eve' } } });
   await setDoc(doc(db, 'households', 'h2', 'transactions', 'x1'), { amount: 99 });
   await setDoc(doc(db, 'households', 'h1', 'GeminiInteractionLogs', 'g1'), { rawSmsContent: 'x' });
+  // The family list. evil@ and outsider@ are not on it.
+  await setDoc(doc(db, 'config', 'access'), { emails: ['tobin@example.com', 'spouse@example.com', 'new@example.com'] });
+  // An invite that slipped through for someone not on the list.
+  await setDoc(doc(db, 'invites', 'outsider@example.com'), { email: 'outsider@example.com', householdId: 'h1', invitedByUid: 'u1' });
 });
 
 const ctx = (uid, email, verified = true) => env.authenticatedContext(uid, { email, email_verified: verified }).firestore();
@@ -22,6 +26,7 @@ const owner = ctx('u1', 'Tobin@Example.com');
 const spouse = ctx('u2', 'spouse@example.com');
 const unverified = ctx('u1', 'tobin@example.com', false);
 const stranger = ctx('u5', 'evil@example.com');
+const outsider = ctx('u8', 'outsider@example.com');
 const newbie = ctx('u7', 'new@example.com');
 const anon = env.unauthenticatedContext().firestore();
 
@@ -40,6 +45,9 @@ await t('stranger cannot read other household tx', assertFails(getDocs(collectio
 await t('stranger cannot write other household tx', assertFails(setDoc(tx(stranger, 'h1', 'evil'), { amount: 1 })));
 await t('member cannot read other household', assertFails(getDoc(tx(owner, 'h2', 'x1'))));
 await t('anon denied', assertFails(getDocs(collection(anon, 'households', 'h1', 'transactions'))));
+await t('member adds a shared reserve', assertSucceeds(setDoc(doc(owner, 'households', 'h1', 'reserves', 'r1'), { name: 'Insurance', amount: 12000 })));
+await t('member reads shared reserves', assertSucceeds(getDocs(collection(owner, 'households', 'h1', 'reserves'))));
+await t('stranger cannot read reserves', assertFails(getDocs(collection(stranger, 'households', 'h1', 'reserves'))));
 await t('unknown subcollection denied', assertFails(getDoc(doc(owner, 'households', 'h1', 'GeminiInteractionLogs', 'g1'))));
 await t('unknown top-level collection denied', assertFails(getDoc(doc(owner, 'Transactions', 't1'))));
 
@@ -54,11 +62,19 @@ await t('new owner seeds accounts', assertSucceeds(setDoc(doc(newbie, 'household
 await t('cannot create household with someone else in it', assertFails(setDoc(doc(newbie, 'households', 'h4'), { householdId: 'h4', ownerUid: 'u7', memberUids: ['u7', 'u1'], members: { u7: {} } })));
 await t('cannot create household owned by someone else', assertFails(setDoc(doc(newbie, 'households', 'h5'), { householdId: 'h5', ownerUid: 'u1', memberUids: ['u7'], members: { u7: {} } })));
 
+const invite = (db, email, hid, by) => setDoc(doc(db, 'invites', email), { email, householdId: hid, householdName: 'Home', invitedByUid: by, invitedByName: 'Tobin', createdAt: 1 });
+
+// Family list
+await t('account not on the list cannot create a household', assertFails(setDoc(doc(outsider, 'households', 'h8'), { householdId: 'h8', name: 'X', ownerUid: 'u8', memberUids: ['u8'], members: { u8: {} } })));
+await t('cannot invite an account not on the list', assertFails(invite(owner, 'friend@example.com', 'h1', 'u1')));
+await t('account not on the list cannot join even with an invite', assertFails(updateDoc(doc(outsider, 'households', 'h1'), joinUpdate('u8', 'Out'))));
+await t('apps cannot read the list', assertFails(getDoc(doc(owner, 'config', 'access'))));
+await t('apps cannot change the list', assertFails(setDoc(doc(owner, 'config', 'access'), { emails: ['evil@example.com'] })));
+
 // Joining without an invite
 await t('cannot join without invite', assertFails(updateDoc(doc(stranger, 'households', 'h1'), joinUpdate('u5', 'Eve'))));
 
 // Invites
-const invite = (db, email, hid, by) => setDoc(doc(db, 'invites', email), { email, householdId: hid, householdName: 'Home', invitedByUid: by, invitedByName: 'Tobin', createdAt: 1 });
 await t('stranger cannot invite into h1', assertFails(invite(stranger, 'spouse@example.com', 'h1', 'u5')));
 await t('member invites partner', assertSucceeds(invite(owner, 'spouse@example.com', 'h1', 'u1')));
 await t('member re-sends own invite', assertSucceeds(invite(owner, 'spouse@example.com', 'h1', 'u1')));
