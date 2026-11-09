@@ -34,480 +34,145 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.Account
 import com.example.data.AccountType
+import com.example.domain.FreeToSpendRules
+import com.example.domain.ReconcileRules
 import com.example.ui.viewmodel.ExpenseViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun CategoryManagementScreen(
     viewModel: ExpenseViewModel,
     onBackClick: () -> Unit
 ) {
+    androidx.activity.compose.BackHandler { onBackClick() }
     val categories by viewModel.categories.collectAsState()
-    
-    var selectedTab by remember { mutableStateOf(0) } // 0 = ALL, 1 = ASSET, 2 = LIABILITY, 3 = EQUITY, 4 = INCOME, 5 = EXPENSE
-    val masterGroups = listOf("ALL", "ASSET", "LIABILITY", "EQUITY", "INCOME", "EXPENSE")
+    // Same list with ledger balances worked out.
+    val accountsWithBalances by viewModel.accounts.collectAsState()
+    val myUid by viewModel.currentUserUid.collectAsState()
+    val partnerName = viewModel.spouseUserFirstName.collectAsState().value ?: "Partner"
+
+    // 0 = Accounts, 1 = Spending categories, 2 = Income categories
+    var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
-    
-    // Collapsed groups state
-    var collapsedGroups by remember { mutableStateOf(setOf<String>()) }
-    
-    val filteredCategories = remember(categories, selectedTab, searchQuery) {
-        val targetClass = masterGroups[selectedTab]
-        val byClass = if (targetClass == "ALL") {
-            categories
-        } else {
-            categories.filter { it.accountClass.uppercase() == targetClass }
-        }
-        
-        val q = searchQuery.trim().lowercase()
-        if (q.isEmpty()) {
-            byClass
-        } else {
-            byClass.filter {
-                it.name.lowercase().contains(q) ||
-                it.mainCategory.lowercase().contains(q) ||
-                it.accountClass.lowercase().contains(q) ||
-                it.lastFourDigits.contains(q) ||
-                it.ownerFirstName.lowercase().contains(q)
-            }
-        }
-    }
-    
-    val groupedByClass = remember(filteredCategories) {
-        filteredCategories.groupBy { it.accountClass.uppercase().ifBlank { "OTHER" } }
-    }
-    
+
     var showAddDialog by remember { mutableStateOf(false) }
-    var initialAddClass by remember { mutableStateOf("ASSET") }
     var editingCategory by remember { mutableStateOf<Account?>(null) }
     var reconcilingAccount by remember { mutableStateOf<Account?>(null) }
-    
+    var confirmDelete by remember { mutableStateOf<Account?>(null) }
+
+    val balances = remember(accountsWithBalances) { accountsWithBalances.associate { it.accountId to it.balance } }
+    val now = remember { System.currentTimeMillis() }
+
+    val accountGroups = remember(categories) {
+        val real = categories.filter { it.accountClass.uppercase() == "ASSET" || it.accountClass.uppercase() == "LIABILITY" || it.accountClass.uppercase() == "EQUITY" }
+        listOf(
+            "Bank & cash" to real.filter { FreeToSpendRules.isLiquid(it) },
+            "Credit cards" to real.filter { FreeToSpendRules.isCard(it) },
+            "Loans" to real.filter { it.accountType == "LIABILITY" && it.type == AccountType.LOAN },
+            "Investments" to real.filter { it.accountType == "ASSET" && (it.type == AccountType.FIXED_DEPOSIT || it.type == AccountType.MUTUAL_FUND) },
+            "Other" to real.filter { it.accountClass.uppercase() == "EQUITY" }
+        ).map { (title, list) -> title to list.sortedBy { it.name.lowercase() } }.filter { it.second.isNotEmpty() }
+    }
+
+    val categoryClass = if (tab == 2) "INCOME" else "EXPENSE"
+    val categoryGroups = remember(categories, tab, searchQuery) {
+        val q = searchQuery.trim().lowercase()
+        categories
+            .filter { it.accountClass.uppercase() == categoryClass }
+            .filter { q.isEmpty() || it.name.lowercase().contains(q) || it.mainCategory.lowercase().contains(q) }
+            .groupBy { it.mainCategory.ifBlank { "General" } }
+            .toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    }
+
+    fun ownerLabel(a: Account): String = when {
+        a.ownerUserId.equals("SHARED", true) || a.ownerUserId.isBlank() -> "Joint"
+        a.ownerUserId == myUid -> "Yours"
+        else -> partnerName
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize().navigationBarsPadding(),
         topBar = {
             TopAppBar(
-                title = { 
-                    Column {
-                        Text("Chart of Accounts", fontWeight = FontWeight.Bold)
-                        Text(
-                            text = "${categories.size} Active Ledgers & Categories across 5 Heads", 
-                            style = MaterialTheme.typography.bodySmall, 
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                        )
-                    }
-                },
+                title = { Text("Accounts & categories", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                    IconButton(onClick = onBackClick) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
+                }
             )
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { 
-                    initialAddClass = if (selectedTab in 1..5) masterGroups[selectedTab] else "ASSET"
-                    showAddDialog = true 
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = RoundedCornerShape(16.dp),
+                onClick = { showAddDialog = true },
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                text = { Text(if (tab == 0) "Add account" else "Add category") },
                 modifier = Modifier.testTag("add_category_fab")
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Add Ledger / Node", fontWeight = FontWeight.Bold)
-            }
+            )
         }
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            // 5 Major Heads Tab Bar
-            ScrollableTabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                edgePadding = 12.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                val tabs = listOf(
-                    Triple("ALL", Icons.Default.AccountTree, categories.size),
-                    Triple("ASSETS", Icons.Default.AccountBalance, categories.count { it.accountClass.uppercase() == "ASSET" }),
-                    Triple("LIABILITIES", Icons.Default.CreditCard, categories.count { it.accountClass.uppercase() == "LIABILITY" }),
-                    Triple("EQUITY", Icons.Default.PieChart, categories.count { it.accountClass.uppercase() == "EQUITY" }),
-                    Triple("INCOME", Icons.Default.ArrowUpward, categories.count { it.accountClass.uppercase() == "INCOME" }),
-                    Triple("EXPENSES", Icons.Default.ArrowDownward, categories.count { it.accountClass.uppercase() == "EXPENSE" })
-                )
-                
-                tabs.forEachIndexed { idx, (label, icon, count) ->
-                    Tab(
-                        selected = selectedTab == idx,
-                        onClick = { selectedTab = idx },
-                        text = { 
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(label, fontWeight = if (selectedTab == idx) FontWeight.Bold else FontWeight.Medium, fontSize = 11.sp)
-                                Surface(
-                                    shape = CircleShape,
-                                    color = if (selectedTab == idx) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
-                                    modifier = Modifier.padding(start = 2.dp)
-                                ) {
-                                    Text(
-                                        text = "$count",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (selectedTab == idx) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                    )
-                                }
-                            }
-                        },
-                        icon = { Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
+        Column(Modifier.fillMaxSize().padding(innerPadding)) {
+            TabRow(selectedTabIndex = tab) {
+                listOf("Accounts", "Spending", "Income").forEachIndexed { i, label ->
+                    Tab(selected = tab == i, onClick = { tab = i; searchQuery = "" }, text = { Text(label) })
                 }
             }
 
-            // Search and Controls Bar
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            androidx.compose.foundation.lazy.LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp)
             ) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    placeholder = { Text("Search account name, group, last 4 digits...", fontSize = 12.sp) },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear search", modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
-                    )
-                )
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Showing ${filteredCategories.size} accounts / nodes",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "Expand All",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable { collapsedGroups = emptySet() }
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                        )
-                        Text(
-                            text = "•",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "Collapse All",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable {
-                                    val allGroupKeys = mutableSetOf<String>()
-                                    groupedByClass.forEach { (cls, list) ->
-                                        list.groupBy { it.mainCategory }.keys.forEach { main ->
-                                            allGroupKeys.add("${cls}_$main")
-                                        }
-                                    }
-                                    collapsedGroups = allGroupKeys
-                                }
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                        )
+                if (tab == 0) {
+                    if (accountGroups.isEmpty()) {
+                        item { EmptyHint("No accounts yet. Add your bank accounts and cards so balances and Free to spend work.") }
                     }
-                }
-            }
-            
-            // Content
-            if (filteredCategories.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.AccountTree,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.outline
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = if (searchQuery.isNotEmpty()) "No accounts match '$searchQuery'" else "No accounts or categories in ${masterGroups[selectedTab]}.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Tap + to configure a tracking ledger or category inside this group.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 24.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                initialAddClass = if (selectedTab in 1..5) masterGroups[selectedTab] else "ASSET"
-                                showAddDialog = true
+                    accountGroups.forEach { (title, list) ->
+                        item(key = "h_$title") {
+                            val total = list.sumOf { balances[it.accountId] ?: 0.0 }
+                            GroupHeader(title, formatAmount(kotlin.math.abs(total)))
+                        }
+                        items(list.size, key = { list[it].accountId }) { i ->
+                            val acc = list[i]
+                            AccountRow(
+                                account = acc,
+                                balance = balances[acc.accountId] ?: 0.0,
+                                owner = ownerLabel(acc),
+                                now = now,
+                                onClick = { editingCategory = acc },
+                                onReconcile = { reconcilingAccount = acc }
+                            )
+                        }
+                    }
+                } else {
+                    item {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Search categories") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) IconButton(onClick = { searchQuery = "" }) { Icon(Icons.Default.Clear, contentDescription = "Clear") }
                             },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Create Node")
-                        }
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                        )
                     }
-                }
-            } else {
-                // Scalable Hierarchical Accordion View
-                val primaryColor = MaterialTheme.colorScheme.primary
-                val errorColor = MaterialTheme.colorScheme.error
-                val secondaryColor = MaterialTheme.colorScheme.secondary
-
-                androidx.compose.foundation.lazy.LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 80.dp, top = 4.dp)
-                ) {
-                    groupedByClass.forEach { (accountClass, classAccounts) ->
-                        val classHeadColor = when (accountClass) {
-                            "ASSET" -> primaryColor
-                            "LIABILITY" -> errorColor
-                            "EQUITY" -> Color(0xFF8B5CF6)
-                            "INCOME" -> Color(0xFF10B981)
-                            "EXPENSE" -> Color(0xFFF59E0B)
-                            else -> secondaryColor
-                        }
-
-                        val classHeadIcon = when (accountClass) {
-                            "ASSET" -> Icons.Default.AccountBalance
-                            "LIABILITY" -> Icons.Default.CreditCard
-                            "EQUITY" -> Icons.Default.PieChart
-                            "INCOME" -> Icons.Default.ArrowUpward
-                            "EXPENSE" -> Icons.Default.ArrowDownward
-                            else -> Icons.Default.AccountTree
-                        }
-
-                        // Head Title Banner (shown when in ALL mode)
-                        if (selectedTab == 0) {
-                            item(key = "head_header_$accountClass") {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = classHeadColor.copy(alpha = 0.12f),
-                                    border = BorderStroke(1.dp, classHeadColor.copy(alpha = 0.25f)),
-                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = classHeadIcon,
-                                                contentDescription = null,
-                                                tint = classHeadColor,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Text(
-                                                text = "MAJOR HEAD: $accountClass",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = classHeadColor
-                                            )
-                                        }
-
-                                        Text(
-                                            text = "${classAccounts.size} Nodes",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = classHeadColor
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Group by Main Category within Head
-                        val byMainCategory = classAccounts.groupBy { it.mainCategory.ifBlank { "General" } }
-
-                        byMainCategory.forEach { (mainCategory, subList) ->
-                            val groupKey = "${accountClass}_$mainCategory"
-                            val isCollapsed = collapsedGroups.contains(groupKey)
-
-                            item(key = "group_card_$groupKey") {
-                                Card(
-                                    shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                                    ),
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)),
-                                    modifier = Modifier.fillMaxWidth().testTag("accordion_group_$groupKey")
-                                ) {
-                                    Column(modifier = Modifier.fillMaxWidth()) {
-                                        // Accordion Header
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    collapsedGroups = if (isCollapsed) {
-                                                        collapsedGroups - groupKey
-                                                    } else {
-                                                        collapsedGroups + groupKey
-                                                    }
-                                                }
-                                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(8.dp),
-                                                    color = classHeadColor.copy(alpha = 0.15f),
-                                                    modifier = Modifier.size(32.dp)
-                                                ) {
-                                                    Box(contentAlignment = Alignment.Center) {
-                                                        Icon(
-                                                            imageVector = getCategoryIcon(mainCategory),
-                                                            contentDescription = null,
-                                                            tint = classHeadColor,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                    }
-                                                }
-
-                                                Column {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = mainCategory,
-                                                            style = MaterialTheme.typography.titleMedium,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = MaterialTheme.colorScheme.onSurface
-                                                        )
-                                                        Surface(
-                                                            shape = CircleShape,
-                                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                                                        ) {
-                                                            Text(
-                                                                text = "${subList.size}",
-                                                                fontSize = 10.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                if (accountClass == "ASSET" || accountClass == "LIABILITY") {
-                                                    val groupTotal = subList.sumOf { it.balance }
-                                                    Text(
-                                                        text = formatAmount(if (accountClass == "LIABILITY") Math.abs(groupTotal) else groupTotal),
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = if (accountClass == "LIABILITY") MaterialTheme.colorScheme.error else Color(0xFF2E7D32)
-                                                    )
-                                                }
-
-                                                IconButton(
-                                                    onClick = {
-                                                        collapsedGroups = if (isCollapsed) collapsedGroups - groupKey else collapsedGroups + groupKey
-                                                    },
-                                                    modifier = Modifier.size(28.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = if (isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                                                        contentDescription = if (isCollapsed) "Expand" else "Collapse",
-                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        // Accordion Children
-                                        AnimatedVisibility(
-                                            visible = !isCollapsed,
-                                            enter = expandVertically() + fadeIn(),
-                                            exit = shrinkVertically() + fadeOut()
-                                        ) {
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                                            ) {
-                                                Divider(
-                                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f),
-                                                    modifier = Modifier.padding(bottom = 4.dp)
-                                                )
-
-                                                subList.forEach { account ->
-                                                    HierarchicalAccountRowItem(
-                                                        account = account,
-                                                        accountClass = accountClass,
-                                                        onClick = { editingCategory = account },
-                                                        onReconcileClick = { reconcilingAccount = account }
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
+                    if (categoryGroups.isEmpty()) {
+                        item { EmptyHint(if (searchQuery.isBlank()) "No categories yet." else "Nothing matches \"$searchQuery\".") }
+                    }
+                    categoryGroups.forEach { (group, list) ->
+                        item(key = "g_$group") { GroupHeader(group, "${list.size}") }
+                        item(key = "c_$group") {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                list.sortedBy { it.name.lowercase() }.forEach { cat ->
+                                    AssistChip(
+                                        onClick = { editingCategory = cat },
+                                        label = { Text(cat.name) },
+                                        leadingIcon = { Icon(getCategoryIcon(cat.name, cat.iconName), contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                    )
                                 }
                             }
                         }
@@ -516,16 +181,37 @@ fun CategoryManagementScreen(
             }
         }
     }
-    
+
     // --- ADD DIALOG ---
     if (showAddDialog) {
         AddAccountOrNodeDialog(
             viewModel = viewModel,
             onDismissRequest = { showAddDialog = false },
-            initialSelectedClass = initialAddClass
+            initialSelectedClass = when (tab) { 1 -> "EXPENSE"; 2 -> "INCOME"; else -> "ASSET" }
         )
     }
-    
+
+    // --- DELETE CONFIRMATION ---
+    confirmDelete?.let { acc ->
+        val isRealAccount = acc.accountType == "ASSET" || acc.accountType == "LIABILITY"
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Delete ${acc.name}?") },
+            text = {
+                Text(
+                    if (isRealAccount) "Its transactions stay, but they will no longer count towards any balance. This can't be undone."
+                    else "Transactions filed under it keep the name but won't belong to a category. This can't be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.deleteCategory(acc.id); confirmDelete = null; editingCategory = null }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } }
+        )
+    }
+
     // --- RECONCILE POPUP ---
     reconcilingAccount?.let { acc ->
         ReconcileAccountDialog(
@@ -997,10 +683,7 @@ fun CategoryManagementScreen(
                 ) {
                     if (!category.isSystemDefault) {
                         Button(
-                            onClick = {
-                                viewModel.deleteCategory(category.id)
-                                editingCategory = null
-                            },
+                            onClick = { confirmDelete = category },
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                             modifier = Modifier.testTag("delete_category_button")
                         ) {
@@ -1022,169 +705,88 @@ fun CategoryManagementScreen(
 }
 
 @Composable
-fun HierarchicalAccountRowItem(
+private fun GroupHeader(title: String, trailing: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp, start = 4.dp, end = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(title.uppercase(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Text(trailing, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun EmptyHint(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp, horizontal = 24.dp)
+    )
+}
+
+/**
+ * One account: name, owner and last 4 digits, balance, and when it was last checked against
+ * the bank. Overdue reconciliations are flagged (30 days for banks and cards, 60 for the rest).
+ */
+@Composable
+private fun AccountRow(
     account: Account,
-    accountClass: String,
+    balance: Double,
+    owner: String,
+    now: Long,
     onClick: () -> Unit,
-    onReconcileClick: () -> Unit
+    onReconcile: () -> Unit
 ) {
-    val isAssetOrLiability = accountClass == "ASSET" || accountClass == "LIABILITY"
-    val isRealTimeTracking = account.lastFourDigits.isNotBlank() || account.openingBalance != 0.0
-    val icon = getCategoryIcon(account.name, account.iconName)
-    val balanceColor = if (account.balance < 0 || accountClass == "LIABILITY") MaterialTheme.colorScheme.error else Color(0xFF2E7D32)
+    val isLiability = account.accountType == "LIABILITY"
+    val days = ReconcileRules.daysSince(account, now)
+    val overdue = days >= ReconcileRules.staleAfterDays(account)
+    val reconciledText = when {
+        account.lastReconciledDate == null -> "Never reconciled"
+        days == 0 -> "Reconciled today"
+        else -> "Reconciled $days day${if (days == 1) "" else "s"} ago"
+    }
 
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("hierarchical_item_${account.id}")
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).testTag("hierarchical_item_${account.id}")
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = account.name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-
-                        if (account.lastFourDigits.isNotBlank()) {
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
-                            ) {
-                                Text(
-                                    text = "••${account.lastFourDigits}",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                )
-                            }
-                        }
-
-                        if (account.isSystemDefault) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
-                                contentColor = MaterialTheme.colorScheme.secondary
-                            ) {
-                                Text("System", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp))
-                            }
-                        }
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(top = 2.dp)
-                    ) {
-                        if (account.ownerFirstName.isNotBlank()) {
-                            Text(
-                                text = "Owner: ${account.ownerFirstName}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
-                                fontWeight = FontWeight.Medium
-                            )
-                        } else {
-                            Text(
-                                text = account.mainCategory,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        if (account.annualInterestRate > 0) {
-                            Text(
-                                text = "• ${account.annualInterestRate}% p.a.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Right side: Balance + Action buttons
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (isAssetOrLiability) {
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = formatAmount(if (accountClass == "LIABILITY") Math.abs(account.balance) else account.balance),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = balanceColor
-                        )
-
-                        account.lastReconciledDate?.let { lastRec ->
-                            Text(
-                                text = "Reconciled: ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(lastRec))}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF2E7D32),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-
-                if (isAssetOrLiability && isRealTimeTracking) {
-                    IconButton(
-                        onClick = onReconcileClick,
-                        modifier = Modifier.size(28.dp).testTag("reconcile_button_${account.id}")
-                    ) {
-                        Icon(
-                            imageVector = if (account.lastReconciledDate != null) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = "Reconcile Account",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                Icon(
-                    imageVector = Icons.Default.ChevronRight,
-                    contentDescription = "Edit Account",
-                    tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                    modifier = Modifier.size(18.dp)
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                getCategoryIcon(account.name, account.iconName),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(account.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    listOfNotNull(owner, account.lastFourDigits.takeIf { it.isNotBlank() }?.let { "••$it" }).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text(
+                    reconciledText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (overdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.clickable(onClick = onReconcile)
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    formatAmount(kotlin.math.abs(balance)),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isLiability && kotlin.math.abs(balance) > 0.5) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                )
+                if (isLiability) Text("owed", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = onReconcile, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp), modifier = Modifier.height(28.dp)) {
+                    Text(if (overdue) "Reconcile now" else "Reconcile", style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
     }
