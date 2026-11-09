@@ -35,7 +35,23 @@ Keep `money-debug.keystore` somewhere safe. Don't commit it.
    downloading the file, so the file includes the sign-in client ID.
 6. Click **google-services.json** to download it.
 
-## 3. GitHub: add the two secrets
+## 3. Firebase: the family list (who may use the app)
+
+Only Google accounts on this list can create or join a household, so nobody else can use
+your Firebase project even if they get the app. It lives in Firebase, not in this (public)
+code.
+
+1. Firebase console > **Firestore Database** > **Data** > **Start collection**.
+2. Collection ID: `config`. Document ID: `access`.
+3. Add a field `emails` of type **array**, with one **string** per person, in lower case,
+   e.g. `you@gmail.com` and `partner@gmail.com`.
+4. Save. Deploy the latest `firestore.rules` too (Firestore > **Rules**: paste the file and
+   **Publish**).
+
+To let someone else in later, add their email to the array. The app can't read or change
+this list.
+
+## 4. GitHub: add the two secrets
 
 On GitHub, open the repo > **Settings** > **Secrets and variables** > **Actions** >
 **New repository secret**:
@@ -45,7 +61,7 @@ On GitHub, open the repo > **Settings** > **Secrets and variables** > **Actions*
 | `GOOGLE_SERVICES_JSON` | The whole contents of `google-services.json` (open it in a text editor, copy everything) |
 | `DEBUG_KEYSTORE_BASE64` | The contents of `money-debug.keystore.b64` |
 
-## 4. Build and install
+## 5. Build and install
 
 1. Repo > **Actions** > **Android build** > **Run workflow** (or just push a change).
 2. When it finishes, open the run and download **money-debug-apk** under **Artifacts**.
@@ -53,7 +69,7 @@ On GitHub, open the repo > **Settings** > **Secrets and variables** > **Actions*
 3. Copy the APK to each phone and open it. Android asks you to allow installs from that app
    (Files or Drive) the first time.
 
-## 5. First launch: App Check debug token
+## 6. First launch: App Check debug token
 
 The app uses App Check's debug provider (it isn't on the Play Store). On first launch each
 phone logs a debug token: connect the phone to a computer and run

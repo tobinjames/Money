@@ -37,7 +37,12 @@ fun HouseholdSetupScreen() {
             try {
                 action()
             } catch (e: Exception) {
-                message = e.message ?: "Something went wrong."
+                message = if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                    e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+                ) {
+                    "This Google account isn't on the family list. Add its email to config/access in the " +
+                        "Firebase console (see docs/BUILD_AND_INSTALL.md), then try again."
+                } else e.message ?: "Something went wrong."
             } finally {
                 busy = false
             }
@@ -202,7 +207,13 @@ fun HouseholdInviteCard() {
                                 Toast.makeText(context, "Invite saved. Ask them to sign in with $email.", Toast.LENGTH_LONG).show()
                                 email = ""
                             } catch (e: Exception) {
-                                Toast.makeText(context, e.message ?: "Could not send the invite.", Toast.LENGTH_LONG).show()
+                                val denied = e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                                    e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+                                Toast.makeText(
+                                    context,
+                                    if (denied) "Add this email to config/access in the Firebase console first." else e.message ?: "Could not send the invite.",
+                                    Toast.LENGTH_LONG
+                                ).show()
                             } finally {
                                 busy = false
                             }
