@@ -52,12 +52,21 @@ jobs:
           JSON
           fi
 
-      # The debug signing key is not in the repo either.
+      # The signing key is not in the repo either. Google sign-in only works when the APK is
+      # signed with a key whose SHA-1 is registered in Firebase, so keep one fixed key in the
+      # DEBUG_KEYSTORE_BASE64 secret (store password and key password "android", alias
+      # "androiddebugkey"). Without it, a throwaway key is made and sign-in won't work.
       - name: Debug keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
-          keytool -genkeypair -keystore debug.keystore -storepass android -keypass android \
-            -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
-            -keyalg RSA -keysize 2048 -validity 10000
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
+          else
+            keytool -genkeypair -keystore debug.keystore -storepass android -keypass android \
+              -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
 
       - name: Compile and unit test
         run: ./gradlew --stacktrace assembleDebug testDebugUnitTest
