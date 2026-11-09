@@ -92,7 +92,7 @@ fun DashboardScreen(
     val smsReceivePermission = rememberPermissionState(permission = Manifest.permission.RECEIVE_SMS)
     
     // Categorize spend types for doughnut display: current month only
-    val categoryTotals = remember(transactionsState, activeScope) {
+    val categoryTotals = rememberInBackground(emptyMap<String, Double>(), transactionsState, activeScope) {
         val totals = mutableMapOf<String, Double>()
         val calCurrent = Calendar.getInstance()
         val currentYear = calCurrent.get(Calendar.YEAR)

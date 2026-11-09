@@ -119,7 +119,7 @@ class ExpenseViewModel : ViewModel() {
             ViewFilter.User1 -> list.filter { isUser1Strict(it.ownerUserId) }
             ViewFilter.User2 -> list.filter { isUser2Strict(it.ownerUserId) }
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val filteredTransactions = combine(transactions, accounts, currentFilter, scopeFilter, currentUserUid) { txList, accList, ownerFilter, scope, myUid ->
         val user1Uid = myUid
@@ -186,7 +186,7 @@ class ExpenseViewModel : ViewModel() {
             val matchesScope = scope == null || tx.scope == scope
             matchesOwner && matchesScope
         }.sortedByDescending { it.timestamp }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Net Assets/Liabilities Summary: Refactored to support AccountMainCategory & AccountClass (Features 1 & 2)
     val netFinancialCalculator = combine(filteredAccounts, accounts) { filtered, all ->
@@ -235,7 +235,7 @@ class ExpenseViewModel : ViewModel() {
             loanOutstanding = loanLiabilities,
             familyNetWorth = familyNetWorthVal
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NetFinancials())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NetFinancials())
 
     // ---------------------------------------------------------------------------------------
     // Free to spend (personal) and reserves (shared)
@@ -275,7 +275,7 @@ class ExpenseViewModel : ViewModel() {
                 salaryDay = day,
                 now = System.currentTimeMillis()
             )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     /** New reserves start counting monthly top-ups from next month; the opening amount is this month's. */
     fun saveReserve(reserve: Reserve) {
