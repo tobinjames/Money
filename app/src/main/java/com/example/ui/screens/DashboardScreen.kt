@@ -61,6 +61,7 @@ fun DashboardScreen(
     viewModel: ExpenseViewModel,
     onNavigateTransactions: () -> Unit,
     onOpenReserves: () -> Unit,
+    onOpenNetWorth: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -533,23 +534,22 @@ fun DashboardScreen(
             FreeToSpendCard(viewModel = viewModel, onOpenReserves = onOpenReserves)
         }
 
-        // ACCOUNTS: every account in one compact card, following the profile tabs above
+        // ACCOUNTS: your bank & cash and credit cards (joint ones too); net worth has its own screen
         item {
-            val title = when (activeFilter) {
-                ViewFilter.Combined -> "Family net worth"
-                ViewFilter.User1 -> "$myNameStr's net worth"
-                ViewFilter.User2 -> "$spouseNameStr's net worth"
-            }
             AccountsOverviewCard(
-                title = title,
-                accounts = if (activeFilter == ViewFilter.Combined) allAccountsState else accountsState,
+                title = "In hand minus card dues",
+                accounts = allAccountsState.filter { acc ->
+                    currentUserUid?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: true
+                },
                 ownerLabel = { acc ->
                     when {
                         acc.ownerUserId.equals("SHARED", true) || acc.ownerUserId.isBlank() -> "Joint"
                         acc.ownerUserId == currentUserUid -> myNameStr
                         else -> spouseNameStr
                     }
-                }
+                },
+                currentOnly = true,
+                onOpenNetWorth = onOpenNetWorth
             )
         }
 

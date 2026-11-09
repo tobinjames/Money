@@ -83,6 +83,11 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
+                } else if (activeSubPage == "networth") {
+                    NetWorthScreen(
+                        viewModel = viewModel,
+                        onBackClick = { activeSubPage = null }
+                    )
                 } else if (activeSubPage == "reserves") {
                     ReservesScreen(
                         viewModel = viewModel,
@@ -144,6 +149,7 @@ class MainActivity : ComponentActivity() {
                                         viewModel = viewModel,
                                         onNavigateTransactions = { selectedTab = ScreenTab.Transactions },
                                         onOpenReserves = { activeSubPage = "reserves" },
+                                        onOpenNetWorth = { activeSubPage = "networth" },
                                         modifier = contentModifier
                                     )
                                 }

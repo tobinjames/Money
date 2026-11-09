@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
@@ -25,22 +26,32 @@ import kotlin.math.abs
 private const val ROWS_BEFORE_MORE = 4
 
 /**
- * Every account in one compact card: net worth on top, then Bank & cash, Credit cards,
- * Investments and Loans, one short line per account. Long groups fold after a few rows.
+ * Accounts in one compact card, one short line per account; long groups fold after a few rows.
+ * - [currentOnly] (the dashboard): bank & cash and credit cards only, headed by what's in hand
+ *   minus what's owed on the cards.
+ * - Otherwise (the Net worth screen): investments and loans too, headed by net worth.
  */
 @Composable
-fun AccountsOverviewCard(title: String, accounts: List<Account>, ownerLabel: (Account) -> String) {
-    val groups = remember(accounts) {
+fun AccountsOverviewCard(
+    title: String,
+    accounts: List<Account>,
+    ownerLabel: (Account) -> String,
+    currentOnly: Boolean = false,
+    onOpenNetWorth: (() -> Unit)? = null
+) {
+    val groups = remember(accounts, currentOnly) {
         listOf(
             "Bank & cash" to accounts.filter { FreeToSpendRules.isLiquid(it) },
             "Credit cards" to accounts.filter { FreeToSpendRules.isCard(it) },
             "Investments" to accounts.filter { it.accountType == "ASSET" && (it.type == AccountType.FIXED_DEPOSIT || it.type == AccountType.MUTUAL_FUND) },
             "Loans" to accounts.filter { it.accountType == "LIABILITY" && it.type == AccountType.LOAN }
         ).filter { it.second.isNotEmpty() }
+            .filter { !currentOnly || it.first == "Bank & cash" || it.first == "Credit cards" }
             .map { (name, list) -> name to list.sortedByDescending { abs(it.balance) } }
     }
-    val assets = accounts.filter { it.accountType == "ASSET" }.sumOf { it.balance }
-    val owed = accounts.filter { it.accountType == "LIABILITY" }.sumOf { abs(it.balance) }
+    val counted = groups.flatMap { it.second }
+    val assets = counted.filter { it.accountType == "ASSET" }.sumOf { it.balance }
+    val owed = counted.filter { it.accountType == "LIABILITY" }.sumOf { abs(it.balance) }
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).testTag("accounts_overview_card"),
@@ -56,12 +67,13 @@ fun AccountsOverviewCard(title: String, accounts: List<Account>, ownerLabel: (Ac
                         formatAmount(assets - owed),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.ExtraBold,
-                        modifier = Modifier.testTag("net_worth_val")
+                        color = if (assets - owed < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.testTag(if (currentOnly) "current_position_val" else "net_worth_val")
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("Own ${formatAmount(assets)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Owe ${formatAmount(owed)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                    Text("${if (currentOnly) "In hand" else "Own"} ${formatAmount(assets)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${if (currentOnly) "Cards owe" else "Owe"} ${formatAmount(owed)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                 }
             }
             if (groups.isEmpty()) {
@@ -72,6 +84,11 @@ fun AccountsOverviewCard(title: String, accounts: List<Account>, ownerLabel: (Ac
                 )
             }
             groups.forEach { (name, list) -> AccountGroup(name, list, ownerLabel) }
+            if (onOpenNetWorth != null) {
+                TextButton(onClick = onOpenNetWorth, contentPadding = PaddingValues(0.dp), modifier = Modifier.padding(top = 4.dp)) {
+                    Text("Net worth, investments & loans →", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }
@@ -127,6 +144,45 @@ private fun AccountGroup(name: String, list: List<Account>, ownerLabel: (Account
     if (list.size > shown.size || showAll && list.size > ROWS_BEFORE_MORE + 1) {
         TextButton(onClick = { showAll = !showAll }, contentPadding = PaddingValues(0.dp)) {
             Text(if (showAll) "Show less" else "Show ${list.size - shown.size} more", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+/** Net worth for you and for the family: every account, including investments and loans. */
+@Composable
+fun NetWorthScreen(viewModel: com.example.ui.viewmodel.ExpenseViewModel, onBackClick: () -> Unit) {
+    androidx.activity.compose.BackHandler { onBackClick() }
+    val accounts by viewModel.accounts.collectAsState()
+    val myUid by viewModel.currentUserUid.collectAsState()
+    val myName = viewModel.currentUserFirstName.collectAsState().value ?: "You"
+    val partnerName = viewModel.spouseUserFirstName.collectAsState().value ?: "Partner"
+    var family by rememberSaveable { mutableStateOf(false) }
+    val ownerLabel: (Account) -> String = { acc ->
+        when {
+            acc.ownerUserId.equals(FreeToSpendRules.SHARED, true) || acc.ownerUserId.isBlank() -> "Joint"
+            acc.ownerUserId == myUid -> myName
+            else -> partnerName
+        }
+    }
+    val shown = if (family || myUid == null) accounts else accounts.filter { FreeToSpendRules.countsFor(it.ownerUserId, myUid!!) }
+
+    androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                IconButton(onClick = onBackClick) { Icon(androidx.compose.material.icons.Icons.Default.ArrowBack, contentDescription = "Back") }
+                Text("Net worth", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !family, onClick = { family = false }, label = { Text("Yours (with joint)") })
+                FilterChip(selected = family, onClick = { family = true }, label = { Text("Whole family") })
+            }
+        }
+        item {
+            AccountsOverviewCard(
+                title = if (family) "Family net worth" else "Your net worth",
+                accounts = shown,
+                ownerLabel = ownerLabel
+            )
         }
     }
 }
