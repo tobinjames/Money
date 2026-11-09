@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -84,7 +85,11 @@ object FirebaseService {
     private const val COL_KEYWORDS = "privacyKeywords"
     // The household document itself (names and partner), loaded alongside the collections.
     private const val HOUSEHOLD_DOC = "household"
-    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_RESERVES, COL_SENDERS, COL_RULES, COL_KEYWORDS)
+    // Transactions older than the live window, read once per session (see loadOlderTransactions).
+    private const val OLDER_TRANSACTIONS = "olderTransactions"
+    /** Transactions from this many months back (from the 1st) are kept live; older ones are read once. */
+    private const val LIVE_MONTHS = 13
+    private val ALL_COLLECTIONS = setOf(HOUSEHOLD_DOC, OLDER_TRANSACTIONS, COL_ACCOUNTS, COL_TRANSACTIONS, COL_BUDGETS, COL_REMINDERS, COL_RESERVES, COL_SENDERS, COL_RULES, COL_KEYWORDS)
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var firestore: FirebaseFirestore? = null
@@ -110,7 +115,12 @@ object FirebaseService {
 
     // --- Local mirrors of the household collections ---
     private val localAccounts = MutableStateFlow<List<Account>>(emptyList())
+    // Every transaction: the live recent window merged with the older history.
     private val localTransactions = MutableStateFlow<List<Transaction>>(emptyList())
+    private val recentTransactions = MutableStateFlow<List<Transaction>>(emptyList())
+    private val olderTransactions = MutableStateFlow<List<Transaction>>(emptyList())
+    // Transactions dated before this are not in the live window.
+    private var liveCutoff = 0L
     private val localReminders = MutableStateFlow<List<Reminder>>(emptyList())
     private val localReserves = MutableStateFlow<List<Reserve>>(emptyList())
     private val localSenders = MutableStateFlow<List<WhitelistedSender>>(emptyList())
@@ -345,6 +355,8 @@ object FirebaseService {
         userName = ""
         localAccounts.value = emptyList()
         localTransactions.value = emptyList()
+        recentTransactions.value = emptyList()
+        olderTransactions.value = emptyList()
         localReminders.value = emptyList()
         localReserves.value = emptyList()
         localSenders.value = emptyList()
@@ -368,9 +380,15 @@ object FirebaseService {
         val fs = firestore ?: return
         val base = fs.collection("households").document(hid)
         loadedCollections.value = emptySet()
+        val liveCutoff = liveWindowStart(System.currentTimeMillis())
+        this.liveCutoff = liveCutoff
 
-        fun <T> listen(name: String, type: Class<T>, sink: MutableStateFlow<List<T>>): ListenerRegistration =
-            base.collection(name).addSnapshotListener { snapshot: QuerySnapshot?, error ->
+        fun <T> listen(
+            name: String, type: Class<T>, sink: MutableStateFlow<List<T>>,
+            query: com.google.firebase.firestore.Query = base.collection(name),
+            onUpdate: () -> Unit = {}
+        ): ListenerRegistration =
+            query.addSnapshotListener { snapshot: QuerySnapshot?, error ->
                 if (error != null) {
                     Log.w(TAG, "$name listener error: ${error.message}")
                     return@addSnapshotListener
@@ -379,6 +397,7 @@ object FirebaseService {
                     sink.value = snapshot.documents.mapNotNull { doc ->
                         try { doc.toObject(type) } catch (e: Exception) { null }
                     }
+                    onUpdate()
                     loadedCollections.value = loadedCollections.value + name
                 }
             }
@@ -397,10 +416,18 @@ object FirebaseService {
             loadedCollections.value = loadedCollections.value + HOUSEHOLD_DOC
         }
 
+        loadOlderTransactions(hid, liveCutoff)
+
         listeners = listOf(
             householdListener,
             listen(COL_ACCOUNTS, Account::class.java, localAccounts),
-            listen(COL_TRANSACTIONS, Transaction::class.java, localTransactions),
+            // Only the recent window is live: a fresh listener re-reads every matching document,
+            // so years of history would eat into the free plan's daily reads on every app start.
+            listen(
+                COL_TRANSACTIONS, Transaction::class.java, recentTransactions,
+                base.collection(COL_TRANSACTIONS).whereGreaterThanOrEqualTo("date", liveCutoff),
+                onUpdate = ::remergeTransactions
+            ),
             listen(COL_BUDGETS, Budget::class.java, localBudgets),
             listen(COL_REMINDERS, Reminder::class.java, localReminders),
             listen(COL_RESERVES, Reserve::class.java, localReserves),
@@ -408,6 +435,43 @@ object FirebaseService {
             listen(COL_RULES, MerchantRule::class.java, localMerchantRules),
             listen(COL_KEYWORDS, PrivacyKeyword::class.java, localPrivacyKeywords)
         )
+    }
+
+    /** The 1st of the month [LIVE_MONTHS] months ago. */
+    private fun liveWindowStart(now: Long): Long = Calendar.getInstance().apply {
+        timeInMillis = now
+        add(Calendar.MONTH, -LIVE_MONTHS)
+        set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    /**
+     * History before [cutoff] rarely changes, so it is read from the phone's own cache (free)
+     * and refreshed from the server at most once a day (to pick up the partner's rare edits).
+     */
+    private fun loadOlderTransactions(hid: String, cutoff: Long) {
+        val fs = firestore ?: return
+        val query = fs.collection("households").document(hid).collection(COL_TRANSACTIONS).whereLessThan("date", cutoff)
+        val prefs = appContext?.getSharedPreferences("transaction_cache", Context.MODE_PRIVATE)
+        val key = "older_refreshed_$hid"
+        serviceScope.launch {
+            val now = System.currentTimeMillis()
+            val recentlyRefreshed = now - (prefs?.getLong(key, 0L) ?: 0L) < 24L * 60 * 60 * 1000
+            val snapshot = (if (recentlyRefreshed) {
+                try { query.get(com.google.firebase.firestore.Source.CACHE).awaitTask() } catch (e: Exception) { null }
+            } else null) ?: try {
+                query.get(com.google.firebase.firestore.Source.SERVER).awaitTask().also { prefs?.edit()?.putLong(key, now)?.apply() }
+            } catch (e: Exception) {
+                Log.w(TAG, "Older transactions not refreshed: ${e.message}")
+                try { query.get(com.google.firebase.firestore.Source.CACHE).awaitTask() } catch (e2: Exception) { null }
+            }
+            if (householdId.value != hid) return@launch
+            olderTransactions.value = snapshot?.documents?.mapNotNull { doc ->
+                try { doc.toObject(Transaction::class.java) } catch (e: Exception) { null }
+            } ?: emptyList()
+            remergeTransactions()
+            loadedCollections.value = loadedCollections.value + OLDER_TRANSACTIONS
+        }
     }
 
     private fun detachListeners() {
@@ -512,13 +576,12 @@ object FirebaseService {
     // Accounts (chart of accounts: real accounts and categories)
     // ---------------------------------------------------------------------------------------
 
-    /** Bank, card and loan accounts with their ledger balances. */
-    fun getAccounts(): Flow<List<Account>> {
-        val realAccounts = localAccounts.map { list -> list.filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" } }
-        return combine(realAccounts, getTransactions()) { accounts, transactions ->
-            accounts.map { it.copy(balance = LedgerRules.balance(it, transactions)) }
-        }
-    }
+    /** Bank, card and loan accounts with their ledger balances, worked out in one pass. */
+    fun getAccounts(): Flow<List<Account>> = combine(localAccounts, localTransactions) { all, transactions ->
+        val accounts = all.filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
+        val balances = LedgerRules.balances(accounts, transactions)
+        accounts.map { it.copy(balance = balances[it.accountId] ?: 0.0) }
+    }.flowOn(Dispatchers.Default)
 
     /** Every chart-of-accounts entry, including income and expense categories. */
     fun getCategories(): Flow<List<Account>> = localAccounts
@@ -585,7 +648,30 @@ object FirebaseService {
 
     fun translateTransactionToLedger(tx: Transaction): Transaction = LedgerRules.toLedger(tx)
 
-    fun getTransactions(): Flow<List<Transaction>> = localTransactions.map { list -> list.map { LedgerRules.toLedger(it) } }
+    /**
+     * Recent and older merged (the live copy wins) and converted to ledger form once, here,
+     * rather than by every reader. Runs before the collection counts as loaded, so background
+     * workers never see a half-built list.
+     */
+    private fun remergeTransactions() {
+        val recent = recentTransactions.value
+        val recentIds = recent.mapTo(HashSet()) { it.transactionId }
+        localTransactions.value = (olderTransactions.value.filter { it.transactionId !in recentIds } + recent)
+            .map { LedgerRules.toLedger(it) }
+    }
+
+    fun getTransactions(): Flow<List<Transaction>> = localTransactions
+
+    /** Keeps an edit to an old transaction from being undone by the next live snapshot. */
+    private fun editOlder(change: (List<Transaction>) -> List<Transaction>) {
+        olderTransactions.value = change(olderTransactions.value)
+        remergeTransactions()
+    }
+
+    /** Puts [tx] in the older history when it is dated before the live window, else takes it out. */
+    private fun placeInOlder(tx: Transaction) = editOlder { list ->
+        list.filter { it.transactionId != tx.transactionId } + (if (tx.date < liveCutoff) listOf(tx) else emptyList())
+    }
 
     /** Blocks edits that fall inside a period already reconciled on an asset or liability account. */
     private fun checkNotInClosedPeriod(tx: Transaction) {
@@ -603,6 +689,7 @@ object FirebaseService {
     suspend fun addTransaction(transaction: Transaction) {
         val ledgerTx = LedgerRules.toLedger(transaction)
         checkNotInClosedPeriod(ledgerTx)
+        placeInOlder(ledgerTx)
         if (localTransactions.value.none { it.transactionId == ledgerTx.transactionId }) {
             localTransactions.value = localTransactions.value + ledgerTx
         }
@@ -613,6 +700,7 @@ object FirebaseService {
     suspend fun updateTransaction(transaction: Transaction) {
         val ledgerTx = LedgerRules.toLedger(transaction)
         checkNotInClosedPeriod(ledgerTx)
+        placeInOlder(ledgerTx)
         upsert(localTransactions, ledgerTx) { it.transactionId == ledgerTx.transactionId }
         write(COL_TRANSACTIONS, ledgerTx.transactionId, ledgerTx, merge = true)
         // Confirming a reviewed item, or changing its category or amount, can move a budget.
@@ -622,6 +710,7 @@ object FirebaseService {
     suspend fun deleteTransaction(transactionId: String) {
         val oldTx = localTransactions.value.find { it.transactionId == transactionId || it.id == transactionId } ?: return
         checkNotInClosedPeriod(LedgerRules.toLedger(oldTx))
+        editOlder { list -> list.filter { it.transactionId != oldTx.transactionId } }
         localTransactions.value = localTransactions.value.filter { it.transactionId != oldTx.transactionId }
         remove(COL_TRANSACTIONS, oldTx.transactionId)
     }

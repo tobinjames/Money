@@ -56,14 +56,34 @@ object LedgerRules {
      * @param upTo only count transactions dated on or before this time, when given.
      */
     fun balance(account: Account, ledgerTxs: List<Transaction>, upTo: Long? = null): Double {
-        val counted = ledgerTxs.filter {
-            !it.isIgnored && it.status == TransactionStatus.CONFIRMED && (upTo == null || it.date <= upTo)
+        var debitSum = 0.0
+        var creditSum = 0.0
+        for (t in ledgerTxs) {
+            if (t.isIgnored || t.status != TransactionStatus.CONFIRMED || (upTo != null && t.date > upTo)) continue
+            if (t.debitAccountId == account.accountId) debitSum += t.amount
+            if (t.creditAccountId == account.accountId) creditSum += t.amount
         }
-        val debitSum = counted.filter { it.debitAccountId == account.accountId }.sumOf { it.amount }
-        val creditSum = counted.filter { it.creditAccountId == account.accountId }.sumOf { it.amount }
+        return fromSums(account, debitSum, creditSum)
+    }
+
+    /**
+     * Every account's balance from a single pass over the transactions (rather than one pass per
+     * account), keyed by account id. Same results as [balance].
+     */
+    fun balances(accounts: List<Account>, ledgerTxs: List<Transaction>): Map<String, Double> {
+        val debits = HashMap<String, Double>()
+        val credits = HashMap<String, Double>()
+        for (t in ledgerTxs) {
+            if (t.isIgnored || t.status != TransactionStatus.CONFIRMED) continue
+            debits[t.debitAccountId] = (debits[t.debitAccountId] ?: 0.0) + t.amount
+            credits[t.creditAccountId] = (credits[t.creditAccountId] ?: 0.0) + t.amount
+        }
+        return accounts.associate { it.accountId to fromSums(it, debits[it.accountId] ?: 0.0, credits[it.accountId] ?: 0.0) }
+    }
+
+    private fun fromSums(account: Account, debitSum: Double, creditSum: Double): Double {
         val isAssetOrLiability = account.accountType == "ASSET" || account.accountType == "LIABILITY"
         val opening = if (isAssetOrLiability) account.openingBalance else 0.0
-
         return when {
             account.type == AccountType.LOAN -> -(abs(opening) + creditSum - debitSum)
             account.accountType == "LIABILITY" -> opening + creditSum - debitSum

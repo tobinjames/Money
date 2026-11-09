@@ -83,8 +83,8 @@ object FreeToSpendRules {
     }
 
     /** One card's dues split into billed and still building up. */
-    fun cardLine(card: Account, txs: List<Transaction>, now: Long): CardLine {
-        val owed = max(0.0, LedgerRules.balance(card, txs))
+    fun cardLine(card: Account, txs: List<Transaction>, now: Long, balance: Double = LedgerRules.balance(card, txs)): CardLine {
+        val owed = max(0.0, balance)
         if (card.billingCycleDay !in 1..31) return CardLine(card, owed, owed, 0.0)
         val cycle = ReminderRules.latestStatement(card, now)
         val statement = LedgerRules.balance(card, txs, upTo = cycle.statementDate)
@@ -132,9 +132,10 @@ object FreeToSpendRules {
         now: Long
     ): Breakdown {
         val mine = accounts.filter { countsFor(it.ownerUserId, myUid) }
+        val balances = LedgerRules.balances(mine, txs)
 
-        val liquid = mine.filter { isLiquid(it) }.map { it to LedgerRules.balance(it, txs) }
-        val cards = mine.filter { isCard(it) }.map { cardLine(it, txs, now) }.filter { it.owed > 0.0 || it.spentSinceStatement > 0.0 }
+        val liquid = mine.filter { isLiquid(it) }.map { it to (balances[it.accountId] ?: 0.0) }
+        val cards = mine.filter { isCard(it) }.map { cardLine(it, txs, now, balances[it.accountId] ?: 0.0) }.filter { it.owed > 0.0 || it.spentSinceStatement > 0.0 }
 
         val horizon = nextSalary(salaryDay, now)
         val bills = reminders
