@@ -42,4 +42,16 @@ object SmsLog {
             Log.w("SmsLog", "Could not write the SMS log: ${e.message}")
         }
     }
+
+    /** Lets a message be read again (when it is re-sent to Gemini). */
+    @Synchronized
+    fun forget(context: Context, sender: String, body: String) {
+        val set = load(context)
+        if (!set.remove(SmsRules.fingerprint(sender, body))) return
+        try {
+            File(context.filesDir, FILE).writeText(set.joinToString("") { it + "\n" })
+        } catch (e: Exception) {
+            Log.w("SmsLog", "Could not rewrite the SMS log: ${e.message}")
+        }
+    }
 }

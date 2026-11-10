@@ -109,6 +109,12 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
 
         suspend fun runChecks(context: Context) {
+            // SMS that Gemini could not read earlier get another go first, so what follows sees them.
+            try {
+                if (com.example.sms.GeminiStatus.missed(context).isNotEmpty()) com.example.sms.SmsProcessor.retryWithGemini(context)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not re-send SMS to Gemini: ${e.message}")
+            }
             val now = System.currentTimeMillis()
             val txs = FirebaseService.getTransactions().first()
             val accounts = FirebaseService.getCategories().first()

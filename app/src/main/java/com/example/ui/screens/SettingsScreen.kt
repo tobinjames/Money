@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import com.example.sms.GeminiStatus
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -992,6 +993,7 @@ private fun HealthCard() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
             else openAppSettings()
         }
+        GeminiHealthRow()
         HealthRow(
             "Background running", batteryOk,
             if (batteryOk) "Not restricted" else "Battery saving may delay alerts and SMS; set the app to Unrestricted"
@@ -1020,7 +1022,24 @@ private fun HealthCard() {
 }
 
 @Composable
-private fun HealthRow(title: String, ok: Boolean, detail: String, onFix: () -> Unit) {
+private fun GeminiHealthRow() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val gemini by GeminiStatus.state.collectAsState()
+    LaunchedEffect(Unit) { GeminiStatus.load(context) }
+    HealthRow(
+        "Gemini (reads your SMS)",
+        ok = !gemini.unavailable && gemini.waiting == 0,
+        detail = geminiStatusText(gemini),
+        fixLabel = if (gemini.retrying) "Trying…" else "Try again",
+        canFix = gemini.waiting > 0 && !gemini.retrying
+    ) { retryGemini(context, scope) }
+}
+
+@Composable
+private fun HealthRow(
+    title: String, ok: Boolean, detail: String, fixLabel: String = "Fix", canFix: Boolean = true, onFix: () -> Unit
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1036,7 +1055,7 @@ private fun HealthRow(title: String, ok: Boolean, detail: String, onFix: () -> U
             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!ok) TextButton(onClick = onFix) { Text("Fix") }
+        if (!ok && (canFix || fixLabel != "Fix")) TextButton(onClick = onFix, enabled = canFix) { Text(fixLabel) }
     }
 }
 

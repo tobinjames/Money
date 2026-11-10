@@ -3,6 +3,7 @@ package com.example.sms
 import android.content.Context
 import android.util.Log
 import com.example.ai.GeminiSmsParser
+import com.example.ai.ParseOutcome
 import com.example.ai.ParsedTransactionResponse
 import com.example.data.*
 import com.example.domain.FreeToSpendRules
@@ -49,7 +50,62 @@ object SmsProcessor {
     suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long): Boolean =
         lock.withLock { process(context.applicationContext, sender, body, timestamp) }
 
-    private suspend fun process(context: Context, sender: String, body: String, timestamp: Long): Boolean {
+    /**
+     * Sends the SMS Gemini missed to it again. Stops when Gemini is still not answering. What
+     * the simple reader made from a message is replaced by Gemini's reading, unless you have
+     * already reviewed or deleted it. Returns how many were read.
+     */
+    suspend fun retryWithGemini(context: Context): Int = lock.withLock {
+        val app = context.applicationContext
+        if (!FirebaseService.hasSignedInUser() || !FirebaseService.ensureCoreDataLoaded()) return@withLock 0
+        val waiting = GeminiStatus.missed(app)
+        if (waiting.isEmpty()) return@withLock 0
+        GeminiStatus.setRetrying(true)
+        var read = 0
+        var failures = 0
+        try {
+            for (item in waiting) {
+                val outcome = GeminiSmsParser.parseDetailed(
+                    item.body,
+                    FirebaseService.getMerchantRules().first(),
+                    FirebaseService.getCategories().first(),
+                    FirebaseService.getAccounts().first()
+                )
+                if (!outcome.geminiOk) {
+                    GeminiStatus.recordFailure(app, outcome.error)
+                    // Give up on a message after two weeks, so one odd SMS can't wait for ever.
+                    if (System.currentTimeMillis() - item.timestamp > 14L * 24 * 60 * 60 * 1000) GeminiStatus.removeMissed(app, item)
+                    // One failure may be that message; two in a row means Gemini is still down.
+                    if (++failures >= 2) break
+                    continue
+                }
+                failures = 0
+                GeminiStatus.recordOk(app)
+                val made = FirebaseService.getTransactions().first().filter { it.transactionId in item.transactionIds }
+                val untouched = made.size == item.transactionIds.size && made.all { it.status == TransactionStatus.PENDING_REVIEW }
+                if (untouched) {
+                    try {
+                        made.forEach { FirebaseService.deleteTransaction(it.transactionId) }
+                        SmsLog.forget(app, item.sender, item.body)
+                        process(app, item.sender, item.body, item.timestamp, outcome, item.transactionIds.toSet())
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not re-read one SMS: ${e.message}")
+                    }
+                }
+                // Reviewed or deleted by hand already: leave it as the user left it.
+                GeminiStatus.removeMissed(app, item)
+                read++
+            }
+        } finally {
+            GeminiStatus.setRetrying(false)
+        }
+        read
+    }
+
+    private suspend fun process(
+        context: Context, sender: String, body: String, timestamp: Long,
+        alreadyRead: ParseOutcome? = null, replacing: Set<String> = emptySet()
+    ): Boolean {
         // Nothing can be read or saved before sign-in (Firestore rules). Leave the message in the
         // inbox, without moving the "last processed" marker, so the catch-up picks it up later.
         if (!FirebaseService.hasSignedInUser()) return false
@@ -62,11 +118,20 @@ object SmsProcessor {
         if (SmsLog.isHandled(context, sender, body)) return true
 
         val accounts = FirebaseService.getAccounts().first()
-        val history = FirebaseService.getTransactions().first()
+        // On a second read, what the first read made is being replaced: don't match against it.
+        val history = FirebaseService.getTransactions().first().filterNot { it.transactionId in replacing }
         val merchantRules = FirebaseService.getMerchantRules().first()
         val categories = FirebaseService.getCategories().first()
 
+        // What this message was saved as, in case Gemini has to read it again later.
+        val savedIds = ArrayList<String>()
+        var geminiMissed = false
+        suspend fun add(tx: Transaction) {
+            FirebaseService.addTransaction(tx)
+            savedIds.add(tx.transactionId)
+        }
         fun done(): Boolean {
+            if (geminiMissed) GeminiStatus.addMissed(context, GeminiStatus.Missed(sender, body, timestamp, savedIds.toList()))
             SmsLog.markHandled(context, sender, body)
             updateLastProcessedTimestamp(context, timestamp)
             return true
@@ -75,7 +140,11 @@ object SmsProcessor {
         // Already saved (this phone's log was lost, or the partner's phone saw the same SMS).
         if (history.any { SmsRules.sameSms(it.originalSmsText, body) }) return done()
 
-        val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return done()
+        val outcome = alreadyRead ?: GeminiSmsParser.parseDetailed(body, merchantRules, categories, accounts)
+        if (outcome.geminiOk) GeminiStatus.recordOk(context) else GeminiStatus.recordFailure(context, outcome.error)
+        // Gemini couldn't be reached: keep the message so it can be sent again when it is back.
+        geminiMissed = !outcome.geminiOk
+        val parsed = outcome.parsed ?: return done()
         if (parsed.amount <= 0.0) return done()
         val isCredit = parsed.transactionType == "CREDIT"
 
@@ -107,7 +176,10 @@ object SmsProcessor {
         LedgerRules.findRecordedTransfer(history, parsed.amount, timestamp, isCredit, targetAccount.id, cardIds) {
             it.originalSmsText?.contains(mark) == true
         }?.let { transfer ->
-            if (trySave { FirebaseService.updateTransaction(transfer.copy(originalSmsText = "${transfer.originalSmsText}\n$mark$body")) }) return done()
+            if (trySave { FirebaseService.updateTransaction(transfer.copy(originalSmsText = "${transfer.originalSmsText}\n$mark$body")) }) {
+                geminiMissed = false
+                return done()
+            }
         }
 
         // The other side's SMS was saved as a plain expense or income: join the two into a transfer.
@@ -137,7 +209,10 @@ object SmsProcessor {
                 status = TransactionStatus.CONFIRMED,
                 isProbablyDuplicate = false
             )
-            if (trySave { FirebaseService.updateTransaction(merged) }) return done()
+            if (trySave { FirebaseService.updateTransaction(merged) }) {
+                geminiMissed = false
+                return done()
+            }
         }
 
         // A bill payment that names both the bank account and the card: a transfer straight away.
@@ -145,7 +220,7 @@ object SmsProcessor {
             val (bank, card) = payment
             if (card.lastReconciledDate?.let { timestamp < it } != true) {
                 val label = "Card payment: ${bank.name} → ${card.name}"
-                FirebaseService.addTransaction(
+                add(
                     Transaction(
                         amount = parsed.amount,
                         type = TransactionType.TRANSFER,
@@ -212,7 +287,7 @@ object SmsProcessor {
         } else null
         if (investment != null && investment.lastReconciledDate?.let { timestamp < it } != true) {
             val label = "Investment: ${targetAccount.name} → ${investment.name}"
-            FirebaseService.addTransaction(
+            add(
                 Transaction(
                     amount = parsed.amount,
                     type = TransactionType.TRANSFER,
@@ -259,7 +334,7 @@ object SmsProcessor {
             // The paying account was a guess when the SMS was matched to the loan itself.
             val emiStatus = if (targetAccount.id == loan.id || guessed) TransactionStatus.PENDING_REVIEW else TransactionStatus.CONFIRMED
             if (principal > 0.0) {
-                FirebaseService.addTransaction(
+                add(
                     Transaction(
                         amount = principal,
                         type = TransactionType.TRANSFER,
@@ -279,7 +354,7 @@ object SmsProcessor {
                 )
             }
             if (interest > 0.0) {
-                FirebaseService.addTransaction(
+                add(
                     Transaction(
                         amount = interest,
                         type = TransactionType.EXPENSE,
@@ -304,7 +379,7 @@ object SmsProcessor {
         val type = if (isCredit) TransactionType.INCOME else TransactionType.EXPENSE
         val vendor = if (vendorKnown) parsed.vendor.replace("Spent at ", "").trim() else ""
         val note = if (foreign) "Check amount (foreign currency): " else ""
-        FirebaseService.addTransaction(
+        add(
             Transaction(
                 amount = parsed.amount,
                 type = type,

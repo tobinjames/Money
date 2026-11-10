@@ -527,6 +527,9 @@ fun DashboardScreen(
             }
         }
 
+        // Shown only while Gemini is not reading SMS, or some are waiting for it
+        item { GeminiBanner() }
+
         // FREE TO SPEND: personal, until the next salary
         item {
             FreeToSpendCard(viewModel = viewModel, onOpenReserves = onOpenReserves)
