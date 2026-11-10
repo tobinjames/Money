@@ -1544,7 +1544,9 @@ fun AnalyticsScreen(
                             val remaining = totalBudgeted - totalSpent
                             val familyPerDay = com.example.domain.BudgetRules.safePerDay(totalBudgeted, totalSpent, System.currentTimeMillis())
                             Text(
-                                text = if (remaining >= 0) "Left: ${formatAmount(remaining)} · ${formatAmount(familyPerDay ?: 0.0)}/day" else "Over Limit: ${formatAmount(-remaining)}",
+                                text = if (remaining >= 0) "Left: ${formatAmount(remaining)} · ${formatAmount(familyPerDay ?: 0.0)}/day" +
+                                    (com.example.domain.BudgetRules.headingOverBy(totalBudgeted, totalSpent, System.currentTimeMillis())?.let { "\nAt this pace: over by ${formatAmount(it)}" } ?: "")
+                                    else "Over Limit: ${formatAmount(-remaining)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (remaining >= 0) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
@@ -1770,7 +1772,8 @@ fun AnalyticsScreen(
                                 // "Safe to spend": what's left spread over the rest of the month.
                                 val perDay = com.example.domain.BudgetRules.safePerDay(bgt.monthlyLimit, spent, System.currentTimeMillis())
                                 Text(
-                                    text = if (diff >= 0) "${formatAmount(perDay ?: 0.0)}/day left" else "Over by ${formatAmount(-diff)}",
+                                    text = if (diff >= 0) (com.example.domain.BudgetRules.headingOverBy(bgt.monthlyLimit, spent, System.currentTimeMillis())?.let { "On pace to go over by ${formatAmount(it)}" }
+                                        ?: "${formatAmount(perDay ?: 0.0)}/day left") else "Over by ${formatAmount(-diff)}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = if (diff >= 0) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error

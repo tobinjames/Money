@@ -47,6 +47,8 @@ object FreeToSpendRules {
         val cards: List<CardLine>,
         val upcomingBills: Double,
         val bills: List<BillLine>,
+        /** Loan EMIs not yet paid this month (and with no reminder of their own); part of [upcomingBills]. */
+        val emis: List<Pair<Account, Double>> = emptyList(),
         val reserved: Double,
         val reserves: List<Reserve>,
         /** Bills due up to this time are counted. */
@@ -146,11 +148,16 @@ object FreeToSpendRules {
             .mapNotNull { r -> billDue(r, accounts, horizon)?.let { BillLine(r, it) } }
             .sortedBy { it.dueDate }
 
+        // A loan's EMI is known from the loan itself: count it until this month's payment shows up,
+        // unless a reminder for the loan is already doing that.
+        val emis = mine.filter { it.type == AccountType.LOAN && it.monthlyEmi > 0.0 }
+            .filter { loan -> reminders.none { it.accountId == loan.accountId } && !LedgerRules.loanPaidInMonth(loan.accountId, txs, now) }
+            .map { it to it.monthlyEmi }
         val myReserves = reserves.filter { it.amount > 0.0 && reserveCountsFor(it, accounts, myUid) }
 
         val bankAndCash = liquid.sumOf { it.second }
         val cardDues = cards.sumOf { it.owed }
-        val upcoming = bills.sumOf { it.reminder.amount }
+        val upcoming = bills.sumOf { it.reminder.amount } + emis.sumOf { it.second }
         val reserved = myReserves.sumOf { it.amount }
         val counted = (liquid.map { it.first.accountId } + mine.filter { isCard(it) }.map { it.accountId }).toSet()
         val pending = txs.filter {
@@ -164,6 +171,7 @@ object FreeToSpendRules {
             cards = cards,
             upcomingBills = upcoming,
             bills = bills,
+            emis = emis,
             reserved = reserved,
             reserves = myReserves,
             horizon = horizon,

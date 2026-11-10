@@ -136,4 +136,19 @@ class FreeToSpendRulesTest {
         assertEquals(20_000.0, after.unreviewed, 0.01)
         assertEquals(1, after.unreviewedCount)
     }
+
+    @Test
+    fun loanEmiCountsUntilThisMonthsPaymentShowsUp() {
+        val now = time(2026, 11, 9)
+        val loan = Account(accountId = "loan", accountType = "LIABILITY", customMainCategory = "Loans", monthlyEmi = 15_000.0, asOfDate = 0L, ownerUserId = me)
+        val all = accounts + loan
+        val base = FreeToSpendRules.compute(me, accounts, emptyList(), emptyList(), emptyList(), 0, now)
+        val unpaid = FreeToSpendRules.compute(me, all, emptyList(), emptyList(), emptyList(), 0, now)
+        assertEquals(base.freeToSpend - 15_000.0, unpaid.freeToSpend, 0.01)
+        val payment = LedgerRules.toLedger(
+            Transaction(amount = 14_000.0, type = TransactionType.TRANSFER, accountId = "theirBank", targetAccountId = "loan",
+                date = time(2026, 11, 5), timestamp = time(2026, 11, 5), isLoanEmi = true)
+        )
+        assertEquals(0, FreeToSpendRules.compute(me, all, listOf(payment), emptyList(), emptyList(), 0, now).emis.size)
+    }
 }

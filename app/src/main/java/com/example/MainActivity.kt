@@ -91,6 +91,11 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         onBackClick = { activeSubPage = null }
                     )
+                } else if (activeSubPage == "recurring") {
+                    RecurringScreen(
+                        viewModel = viewModel,
+                        onBackClick = { activeSubPage = null }
+                    )
                 } else if (activeSubPage == "reserves") {
                     ReservesScreen(
                         viewModel = viewModel,
@@ -180,6 +185,7 @@ class MainActivity : ComponentActivity() {
                                         onNavigateCategoryManagement = { activeSubPage = "categories" },
                                         onNavigateSmartRules = { activeSubPage = "rules" },
                                         onNavigateReserves = { activeSubPage = "reserves" },
+                                        onNavigateRecurring = { activeSubPage = "recurring" },
                                         modifier = contentModifier
                                     )
                                 }

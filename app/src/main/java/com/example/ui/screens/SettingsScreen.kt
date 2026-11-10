@@ -58,6 +58,7 @@ fun SettingsScreen(
     onNavigateCategoryManagement: () -> Unit,
     onNavigateSmartRules: () -> Unit,
     onNavigateReserves: () -> Unit,
+    onNavigateRecurring: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -137,6 +138,14 @@ fun SettingsScreen(
                             title = "Reserves",
                             subtitle = "Money set aside for what's coming, shared with your partner",
                             onClick = onNavigateReserves
+                        )
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Refresh,
+                            iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            title = "Monthly payments",
+                            subtitle = "Subscriptions and other payments that repeat, and what they cost a year",
+                            onClick = onNavigateRecurring
                         )
                     }
                 }
@@ -887,6 +896,7 @@ private fun AlertSettingsCard() {
     var partner by remember { mutableStateOf(AlertPrefs.partnerAlerts(context)) }
     var budgets by remember { mutableStateOf(AlertPrefs.budgetAlerts(context)) }
     var reconcile by remember { mutableStateOf(AlertPrefs.reconcileAlerts(context)) }
+    var summary by remember { mutableStateOf(AlertPrefs.monthlySummary(context)) }
     var quietFrom by remember { mutableStateOf(AlertPrefs.quietFrom(context)) }
     var quietUntil by remember { mutableStateOf(AlertPrefs.quietUntil(context)) }
 
@@ -902,6 +912,9 @@ private fun AlertSettingsCard() {
         }
         ToggleRow(null, "Reconcile reminders", "Friday evening and weekends: banks and cards after 30 days, FDs, funds and loans after 60", reconcile) {
             reconcile = it; AlertPrefs.setReconcileAlerts(context, it)
+        }
+        ToggleRow(null, "Monthly summary", "At the start of each month: what you spent, on what, and how it compares", summary) {
+            summary = it; AlertPrefs.setMonthlySummary(context, it)
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         Text("Quiet hours", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))

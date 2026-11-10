@@ -62,6 +62,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val MONEY_CHANNEL = "free_to_spend_channel"
         private const val LOW_SENT = "low_balance_alert_sent"
         private const val RECONCILE_SENT = "reconcile_alert_day"
+        private const val SUMMARY_SENT = "monthly_summary_month"
 
         /** A check every 6 hours from about 9 AM, plus one right away. Safe to call on every app start. */
         fun schedule(context: Context) {
@@ -140,6 +141,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             if (AlertPrefs.reminderAlerts(context)) notify(context, reminders, accounts, now)
             if (AlertPrefs.budgetAlerts(context)) notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
             if (AlertPrefs.reconcileAlerts(context)) notifyReconcile(context, accounts, now)
+            if (AlertPrefs.monthlySummary(context)) notifyMonthlySummary(context, txs, accounts, now)
             if (AlertPrefs.lowBalanceAlerts(context)) {
                 reserves = FirebaseService.getReserves().first()
                 val breakdown = FreeToSpendRules.compute(
@@ -147,6 +149,39 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 )
                 notifyLowBalance(context, breakdown)
             }
+        }
+
+        /** In the first five days of a month, once: how last month went. */
+        private fun notifyMonthlySummary(
+            context: Context,
+            txs: List<com.example.data.Transaction>,
+            categories: List<com.example.data.Account>,
+            now: Long
+        ) {
+            val cal = Calendar.getInstance().apply { timeInMillis = now }
+            if (cal.get(Calendar.DAY_OF_MONTH) > 5 || !canNotify(context)) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val thisMonth = FreeToSpendRules.monthKey(now)
+            if (prefs.getString(SUMMARY_SENT, null) == thisMonth) return
+            prefs.edit().putString(SUMMARY_SENT, thisMonth).apply()
+
+            val lastMonth = com.example.domain.LedgerRules.monthBounds(now).first - 1
+            val s = com.example.domain.InsightRules.monthSummary(txs, categories, lastMonth)
+            if (s.spent <= 0.0 && s.income <= 0.0) return
+            val name = java.text.SimpleDateFormat("MMMM", java.util.Locale.getDefault()).format(java.util.Date(lastMonth))
+            val change = s.spent - s.previousSpent
+            val compared = when {
+                s.previousSpent <= 0.0 -> ""
+                change >= 0 -> " (₹%,.0f more than the month before)".format(change)
+                else -> " (₹%,.0f less than the month before)".format(-change)
+            }
+            val lines = mutableListOf("Spent ₹%,.0f".format(s.spent) + "$compared.")
+            if (s.income > 0.0) {
+                lines += if (s.saved >= 0) "Income ₹%,.0f, so ₹%,.0f saved.".format(s.income, s.saved)
+                    else "Income ₹%,.0f: you spent ₹%,.0f more than came in.".format(s.income, -s.saved)
+            }
+            if (s.top.isNotEmpty()) lines += "Most on " + s.top.joinToString(", ") { (c, v) -> "$c ₹%,.0f".format(v) } + "."
+            post(context, MONEY_CHANNEL, "Free to spend", SUMMARY_SENT.hashCode(), "📊 Your $name", lines.joinToString("\n"))
         }
 
         /** Weekend nudge (Friday evening, Saturday, Sunday; once a day) for accounts not reconciled in 30 days. */

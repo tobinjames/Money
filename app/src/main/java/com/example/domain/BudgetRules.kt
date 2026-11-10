@@ -49,6 +49,19 @@ object BudgetRules {
         return left / daysLeftInMonth(now)
     }
 
+    /** Where this month's spending ends up if it carries on at the same daily rate. */
+    fun projected(spent: Double, now: Long): Double {
+        val cal = Calendar.getInstance().apply { timeInMillis = now }
+        return spent / cal.get(Calendar.DAY_OF_MONTH) * cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+    }
+
+    /** How far past [limit] the month is heading, or null when it is on track (or already over). */
+    fun headingOverBy(limit: Double, spent: Double, now: Long): Double? {
+        if (limit <= 0.0 || spent > limit) return null
+        val over = projected(spent, now) - limit
+        return if (over > 0.0) over else null
+    }
+
     /**
      * The family's total limit and spend for the summary card: the overall budget when there is
      * one, otherwise the category budgets added up.

@@ -108,12 +108,13 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
 
                 Spacer(Modifier.height(8.dp))
                 BreakdownRow("Bills before ${shortDate(breakdown.horizon)}", -breakdown.upcomingBills, bold = true)
-                if (breakdown.bills.isEmpty()) {
+                if (breakdown.bills.isEmpty() && breakdown.emis.isEmpty()) {
                     Text("None in Reminders", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp))
                 }
                 breakdown.bills.forEach { line ->
                     BreakdownRow("${line.reminder.title} (${shortDate(line.dueDate)})", -line.reminder.amount, indent = true)
                 }
+                breakdown.emis.forEach { (loan, emi) -> BreakdownRow("${loan.accountName} EMI (not paid yet this month)", -emi, indent = true) }
 
                 Spacer(Modifier.height(8.dp))
                 BreakdownRow("Reserved", -breakdown.reserved, bold = true)
