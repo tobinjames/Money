@@ -1088,7 +1088,17 @@ private fun ExportCard() {
 private fun AccountCard() {
     val name = FirebaseService.getCurrentUserDisplayName()
     val email = FirebaseService.getCurrentUserEmail()
+    val context = LocalContext.current
+    var lock by remember { mutableStateOf(AlertPrefs.appLock(context)) }
     SettingsCard {
+        ToggleRow(Icons.Default.Lock, "App lock", "Ask for your fingerprint, face or phone PIN when the app opens", lock) { on ->
+            if (on && !com.example.MainActivity.canLock(context)) {
+                android.widget.Toast.makeText(context, "Set a screen lock on this phone first.", android.widget.Toast.LENGTH_LONG).show()
+            } else {
+                lock = on; AlertPrefs.setAppLock(context, on)
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         Text(name.ifBlank { "Signed in" }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
         Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(8.dp))

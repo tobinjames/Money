@@ -5,7 +5,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -36,7 +38,50 @@ sealed class ScreenTab(val route: String, val title: String) {
     object Settings : ScreenTab("settings", "Settings")
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+
+    // App lock (Settings > Account): the app's screens stay hidden until the phone's owner unlocks.
+    private val unlocked = mutableStateOf(true)
+
+    private fun promptUnlock() {
+        val prompt = BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                unlocked.value = true
+            }
+        })
+        prompt.authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock Money")
+                .setAllowedAuthenticators(LOCK_WITH)
+                .build()
+        )
+    }
+
+    override fun onStop() {
+        super.onStop()
+        leftAt = System.currentTimeMillis()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Lock again after a minute away. Without a screen lock on the phone there is nothing to ask for.
+        val away = leftAt > 0L && System.currentTimeMillis() - leftAt > 60_000
+        if (com.example.reminders.AlertPrefs.appLock(this) && canLock(this) && (away || leftAt == 0L)) {
+            unlocked.value = false
+            promptUnlock()
+        }
+    }
+
+    companion object {
+        // When the app was last left; kept across a screen rotation, reset when the app is closed.
+        private var leftAt = 0L
+        private const val LOCK_WITH = BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+
+        /** Whether this phone has a fingerprint, face or screen lock to unlock with. */
+        fun canLock(context: android.content.Context): Boolean =
+            BiometricManager.from(context).canAuthenticate(LOCK_WITH) == BiometricManager.BIOMETRIC_SUCCESS
+    }
+
     private val viewModel: ExpenseViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,7 +122,18 @@ class MainActivity : ComponentActivity() {
                 val selectedTab = allTabs.firstOrNull { it.route == selectedRoute } ?: ScreenTab.Dashboard
                 var activeSubPage by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) } // "categories", "rules" or "reserves"
 
-                if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
+                if (!unlocked.value) {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        androidx.compose.foundation.layout.Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+                            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                        ) {
+                            Text("Money is locked", style = MaterialTheme.typography.titleLarge)
+                            androidx.compose.material3.Button(onClick = { promptUnlock() }, modifier = Modifier.padding(top = 16.dp)) { Text("Unlock") }
+                        }
+                    }
+                } else if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
                     HouseholdSetupScreen()
                 } else if (authState != com.example.data.AuthState.AUTHORIZED) {
                     AuthScreen(viewModel = viewModel)
