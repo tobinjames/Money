@@ -104,7 +104,7 @@ object ReminderRules {
     /** Payments into the card (debits to the liability) after the statement date. */
     fun paymentsSince(account: Account, txs: List<Transaction>, statementDate: Long): Double =
         txs.filter {
-            !it.isIgnored && it.status == TransactionStatus.CONFIRMED &&
+            LedgerRules.countsInBalance(it) &&
                 it.debitAccountId == account.accountId && it.date > statementDate
         }.sumOf { it.amount }
 
@@ -119,6 +119,7 @@ object ReminderRules {
         val cycle = latestStatement(account, now)
         if (account.lastBillReminderCycle >= cycle.key) return null
         val owed = statementBalance(account, txs, cycle.statementDate)
+        if (owed <= 0.0) return null
         val reminder = Reminder(
             id = cardBillId(account, cycle),
             title = "${account.name} Bill (${MONTHS[cycle.month]} Cycle)",
@@ -126,7 +127,7 @@ object ReminderRules {
             amount = owed,
             type = "Credit Card",
             isRecurring = false,
-            isPaid = owed <= 0.0 || paymentsSince(account, txs, cycle.statementDate) >= owed - 1.0,
+            isPaid = paymentsSince(account, txs, cycle.statementDate) >= owed - 1.0,
             accountId = account.accountId,
             statementDate = cycle.statementDate
         )

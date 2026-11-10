@@ -72,6 +72,13 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
                 else "Bank and cash after card dues, bills before ${if (salaryDay in 1..31) "salary" else "the next 30 days"} and reserves.",
                 style = MaterialTheme.typography.bodySmall
             )
+            if (breakdown.unreviewedCount > 0) {
+                Text(
+                    "Includes ${formatAmount(breakdown.unreviewed)} from ${breakdown.unreviewedCount} SMS ${if (breakdown.unreviewedCount == 1) "item" else "items"} waiting for your review.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
 
             if (!expanded) {
                 Text(
@@ -101,12 +108,13 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
 
                 Spacer(Modifier.height(8.dp))
                 BreakdownRow("Bills before ${shortDate(breakdown.horizon)}", -breakdown.upcomingBills, bold = true)
-                if (breakdown.bills.isEmpty()) {
+                if (breakdown.bills.isEmpty() && breakdown.emis.isEmpty()) {
                     Text("None in Reminders", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp))
                 }
                 breakdown.bills.forEach { line ->
                     BreakdownRow("${line.reminder.title} (${shortDate(line.dueDate)})", -line.reminder.amount, indent = true)
                 }
+                breakdown.emis.forEach { (loan, emi) -> BreakdownRow("${loan.accountName} EMI (not paid yet this month)", -emi, indent = true) }
 
                 Spacer(Modifier.height(8.dp))
                 BreakdownRow("Reserved", -breakdown.reserved, bold = true)

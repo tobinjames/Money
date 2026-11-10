@@ -24,8 +24,17 @@ data class ParsedTransactionResponse(
     val assignedAccount: String? = null,
     val matchedCategory: String? = null,
     val matchedAccount: String? = null,
-    val ignore: Boolean? = null
+    val ignore: Boolean? = null,
+    // Read by the simple on-phone reader because Gemini was unavailable: always needs review.
+    val fromBackup: Boolean = false
 )
+
+/**
+ * What reading an SMS gave. [geminiOk] is false when Gemini could not be reached (no network, quota,
+ * App Check...) and [parsed] came from the simple on-phone reader instead, or is null because
+ * that reader could not tell. [error] says why, for the status shown in the app.
+ */
+data class ParseOutcome(val parsed: ParsedTransactionResponse?, val geminiOk: Boolean, val error: String? = null)
 
 object GeminiSmsParser {
     private const val TAG = "GeminiSmsParser"
@@ -45,30 +54,18 @@ object GeminiSmsParser {
         merchantRules: List<MerchantRule>,
         categories: List<Account>,
         accountsList: List<Account>
-    ): ParsedTransactionResponse? = withContext(Dispatchers.IO) {
-        val lowerText = rawText.lowercase()
-        val isStatementOrBillAlert = (
-            lowerText.contains("statement") ||
-            lowerText.contains("bill") ||
-            lowerText.contains("min due") ||
-            lowerText.contains("minimum due") ||
-            lowerText.contains("payment due") ||
-            lowerText.contains("total due") ||
-            lowerText.contains("due date")
-        ) && !(
-            lowerText.contains("debited") ||
-            lowerText.contains("credited") ||
-            lowerText.contains("withdrawn") ||
-            lowerText.contains("deposited") ||
-            lowerText.contains("received") ||
-            lowerText.contains("refund") ||
-            lowerText.contains("spent") ||
-            lowerText.contains("paid rs") ||
-            lowerText.contains("paid to")
-        )
-        if (isStatementOrBillAlert) {
+    ): ParsedTransactionResponse? = parseDetailed(rawText, merchantRules, categories, accountsList).parsed
+
+    /** As [parseSms], and also says whether Gemini itself answered. */
+    suspend fun parseDetailed(
+        rawText: String,
+        merchantRules: List<MerchantRule>,
+        categories: List<Account>,
+        accountsList: List<Account>
+    ): ParseOutcome = withContext(Dispatchers.IO) {
+        if (com.example.domain.SmsRules.isStatementNotice(rawText)) {
             Log.d(TAG, "Local intercept: classified statement/bill notification as ignore.")
-            return@withContext null
+            return@withContext ParseOutcome(null, true)
         }
 
         // Step 1: Local Pattern Check
@@ -121,6 +118,9 @@ object GeminiSmsParser {
             """.trimIndent()
         }
 
+        val backup = { why: String ->
+            ParseOutcome(runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList), false, why)
+        }
         try {
             val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
                 modelName = MODEL_NAME,
@@ -131,26 +131,24 @@ object GeminiSmsParser {
                 systemInstruction = content { text(systemInstruction) }
             )
             val extractedText = model.generateContent(rawText).text
-                ?: return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
+                ?: return@withContext backup("Gemini sent an empty reply")
 
             val adapter = moshi.adapter(ParsedTransactionResponse::class.java)
-            val parsedObj = adapter.fromJson(extractedText.trim())
-
-            return@withContext parsedObj?.let { obj ->
-                if (obj.ignore == true) {
-                    Log.d(TAG, "Gemini classified this message as non-transactional (ignore = true). Skipping from accounting.")
-                    return@withContext null
-                }
-                val finalCat = obj.matchedCategory ?: obj.suggestedCategory.ifEmpty { "Unknown" }
-                val finalAcc = obj.matchedAccount ?: obj.assignedAccount
+            val obj = adapter.fromJson(extractedText.trim()) ?: return@withContext backup("Gemini's reply could not be read")
+            if (obj.ignore == true) {
+                Log.d(TAG, "Gemini classified this message as non-transactional (ignore = true). Skipping from accounting.")
+                return@withContext ParseOutcome(null, true)
+            }
+            return@withContext ParseOutcome(
                 obj.copy(
-                    suggestedCategory = finalCat,
-                    assignedAccount = finalAcc
-                )
-            } ?: runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
+                    suggestedCategory = obj.matchedCategory ?: obj.suggestedCategory.ifEmpty { "Unknown" },
+                    assignedAccount = obj.matchedAccount ?: obj.assignedAccount
+                ),
+                true
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Gemini SMS parsing failed (${e.javaClass.simpleName}); using local regex parser.")
-            return@withContext runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList)
+            return@withContext backup(e.message ?: e.javaClass.simpleName)
         }
     }
 
@@ -163,7 +161,10 @@ object GeminiSmsParser {
         matchedCategory: String?,
         categories: List<Account>,
         accountsList: List<Account>
-    ): ParsedTransactionResponse {
+    ): ParsedTransactionResponse? {
+        // Without Gemini there is no way to tell an offer from a payment, so only messages that
+        // plainly say money moved are read; everything read this way goes to review.
+        if (!com.example.domain.SmsRules.looksLikeTransaction(smsText)) return null
         val lower = smsText.lowercase()
         val isCredit = lower.contains("credited") || lower.contains("received") || lower.contains("deposited") || lower.contains("refund")
         val isDebit = lower.contains("debited") || lower.contains("spent") || lower.contains("withdrawn") || lower.contains("paid for") || lower.contains("alert:")
@@ -188,9 +189,7 @@ object GeminiSmsParser {
             }
         }
         
-        if (vendor == "Unknown" || vendor.isEmpty()) {
-            vendor = "Local Transaction"
-        }
+        if (vendor.isEmpty()) vendor = "Unknown"
         
         // Suggested category mapping using intelligent multi-tier COA matching
         val suggestedCategory: String
@@ -210,7 +209,7 @@ object GeminiSmsParser {
                 if (acc.lastFourDigits.isBlank()) false
                 else {
                     val tokens = acc.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                    tokens.any { token -> smsText.contains(token) }
+                    tokens.any { token -> com.example.domain.SmsRules.namesDigits(smsText, token) }
                 }
             }
             // 2. Try matching by account name keywords (e.g., "HDFC", "ICICI")
@@ -233,7 +232,8 @@ object GeminiSmsParser {
             suggestedCategory = suggestedCategory,
             assignedAccount = matchedAccount?.accountName,
             matchedAccount = matchedAccount?.accountName,
-            matchedCategory = suggestedCategory
+            matchedCategory = suggestedCategory,
+            fromBackup = true
         )
     }
 

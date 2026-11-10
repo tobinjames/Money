@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import com.example.sms.GeminiStatus
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -58,6 +59,7 @@ fun SettingsScreen(
     onNavigateCategoryManagement: () -> Unit,
     onNavigateSmartRules: () -> Unit,
     onNavigateReserves: () -> Unit,
+    onNavigateRecurring: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -137,6 +139,14 @@ fun SettingsScreen(
                             title = "Reserves",
                             subtitle = "Money set aside for what's coming, shared with your partner",
                             onClick = onNavigateReserves
+                        )
+                        SettingsPreferenceRow(
+                            icon = Icons.Default.Refresh,
+                            iconContainerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            title = "Monthly payments",
+                            subtitle = "Subscriptions and other payments that repeat, and what they cost a year",
+                            onClick = onNavigateRecurring
                         )
                     }
                 }
@@ -887,6 +897,7 @@ private fun AlertSettingsCard() {
     var partner by remember { mutableStateOf(AlertPrefs.partnerAlerts(context)) }
     var budgets by remember { mutableStateOf(AlertPrefs.budgetAlerts(context)) }
     var reconcile by remember { mutableStateOf(AlertPrefs.reconcileAlerts(context)) }
+    var summary by remember { mutableStateOf(AlertPrefs.monthlySummary(context)) }
     var quietFrom by remember { mutableStateOf(AlertPrefs.quietFrom(context)) }
     var quietUntil by remember { mutableStateOf(AlertPrefs.quietUntil(context)) }
 
@@ -902,6 +913,9 @@ private fun AlertSettingsCard() {
         }
         ToggleRow(null, "Reconcile reminders", "Friday evening and weekends: banks and cards after 30 days, FDs, funds and loans after 60", reconcile) {
             reconcile = it; AlertPrefs.setReconcileAlerts(context, it)
+        }
+        ToggleRow(null, "Monthly summary", "At the start of each month: what you spent, on what, and how it compares", summary) {
+            summary = it; AlertPrefs.setMonthlySummary(context, it)
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         Text("Quiet hours", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
@@ -979,6 +993,7 @@ private fun HealthCard() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
             else openAppSettings()
         }
+        GeminiHealthRow()
         HealthRow(
             "Background running", batteryOk,
             if (batteryOk) "Not restricted" else "Battery saving may delay alerts and SMS; set the app to Unrestricted"
@@ -1007,7 +1022,24 @@ private fun HealthCard() {
 }
 
 @Composable
-private fun HealthRow(title: String, ok: Boolean, detail: String, onFix: () -> Unit) {
+private fun GeminiHealthRow() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val gemini by GeminiStatus.state.collectAsState()
+    LaunchedEffect(Unit) { GeminiStatus.load(context) }
+    HealthRow(
+        "Gemini (reads your SMS)",
+        ok = !gemini.unavailable && gemini.waiting == 0,
+        detail = geminiStatusText(gemini),
+        fixLabel = if (gemini.retrying) "Trying…" else "Try again",
+        canFix = gemini.waiting > 0 && !gemini.retrying
+    ) { retryGemini(context, scope) }
+}
+
+@Composable
+private fun HealthRow(
+    title: String, ok: Boolean, detail: String, fixLabel: String = "Fix", canFix: Boolean = true, onFix: () -> Unit
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1023,7 +1055,7 @@ private fun HealthRow(title: String, ok: Boolean, detail: String, onFix: () -> U
             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!ok) TextButton(onClick = onFix) { Text("Fix") }
+        if (!ok && (canFix || fixLabel != "Fix")) TextButton(onClick = onFix, enabled = canFix) { Text(fixLabel) }
     }
 }
 
@@ -1075,7 +1107,17 @@ private fun ExportCard() {
 private fun AccountCard() {
     val name = FirebaseService.getCurrentUserDisplayName()
     val email = FirebaseService.getCurrentUserEmail()
+    val context = LocalContext.current
+    var lock by remember { mutableStateOf(AlertPrefs.appLock(context)) }
     SettingsCard {
+        ToggleRow(Icons.Default.Lock, "App lock", "Ask for your fingerprint, face or phone PIN when the app opens", lock) { on ->
+            if (on && !com.example.MainActivity.canLock(context)) {
+                android.widget.Toast.makeText(context, "Set a screen lock on this phone first.", android.widget.Toast.LENGTH_LONG).show()
+            } else {
+                lock = on; AlertPrefs.setAppLock(context, on)
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         Text(name.ifBlank { "Signed in" }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
         Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(8.dp))

@@ -47,11 +47,16 @@ object FreeToSpendRules {
         val cards: List<CardLine>,
         val upcomingBills: Double,
         val bills: List<BillLine>,
+        /** Loan EMIs not yet paid this month (and with no reminder of their own); part of [upcomingBills]. */
+        val emis: List<Pair<Account, Double>> = emptyList(),
         val reserved: Double,
         val reserves: List<Reserve>,
         /** Bills due up to this time are counted. */
         val horizon: Long,
-        val freeToSpend: Double
+        val freeToSpend: Double,
+        /** Of the figures above, the part from SMS items not yet reviewed (already counted). */
+        val unreviewed: Double = 0.0,
+        val unreviewedCount: Int = 0
     )
 
     /** An account or reminder owner that counts for [myUid]: theirs, or joint. */
@@ -91,7 +96,7 @@ object FreeToSpendRules {
         val paid = ReminderRules.paymentsSince(card, txs, cycle.statementDate)
         val billed = min(owed, max(0.0, statement - paid))
         val spent = txs.filter {
-            !it.isIgnored && it.status == TransactionStatus.CONFIRMED &&
+            LedgerRules.countsInBalance(it) &&
                 it.creditAccountId == card.accountId && it.date > cycle.statementDate && it.date <= now
         }.sumOf { it.amount }
         return CardLine(card, owed, billed, spent)
@@ -143,12 +148,22 @@ object FreeToSpendRules {
             .mapNotNull { r -> billDue(r, accounts, horizon)?.let { BillLine(r, it) } }
             .sortedBy { it.dueDate }
 
+        // A loan's EMI is known from the loan itself: count it until this month's payment shows up,
+        // unless a reminder for the loan is already doing that.
+        val emis = mine.filter { it.type == AccountType.LOAN && it.monthlyEmi > 0.0 }
+            .filter { loan -> reminders.none { it.accountId == loan.accountId } && !LedgerRules.loanPaidInMonth(loan.accountId, txs, now) }
+            .map { it to it.monthlyEmi }
         val myReserves = reserves.filter { it.amount > 0.0 && reserveCountsFor(it, accounts, myUid) }
 
         val bankAndCash = liquid.sumOf { it.second }
         val cardDues = cards.sumOf { it.owed }
-        val upcoming = bills.sumOf { it.reminder.amount }
+        val upcoming = bills.sumOf { it.reminder.amount } + emis.sumOf { it.second }
         val reserved = myReserves.sumOf { it.amount }
+        val counted = (liquid.map { it.first.accountId } + mine.filter { isCard(it) }.map { it.accountId }).toSet()
+        val pending = txs.filter {
+            it.status == TransactionStatus.PENDING_REVIEW && LedgerRules.countsInBalance(it) &&
+                (it.debitAccountId in counted || it.creditAccountId in counted)
+        }
         return Breakdown(
             bankAndCash = bankAndCash,
             accounts = liquid,
@@ -156,10 +171,13 @@ object FreeToSpendRules {
             cards = cards,
             upcomingBills = upcoming,
             bills = bills,
+            emis = emis,
             reserved = reserved,
             reserves = myReserves,
             horizon = horizon,
-            freeToSpend = bankAndCash - cardDues - upcoming - reserved
+            freeToSpend = bankAndCash - cardDues - upcoming - reserved,
+            unreviewed = pending.sumOf { it.amount },
+            unreviewedCount = pending.size
         )
     }
 

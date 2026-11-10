@@ -250,6 +250,19 @@ fun ReconcileAccountDialog(
                     }
                 }
 
+                val waiting = remember(account, selectedDateMillis, transactions) { viewModel.pendingBefore(account.id, selectedDateMillis) }
+                if (waiting.isNotEmpty()) {
+                    val duplicates = waiting.count { it.isProbablyDuplicate }
+                    Text(
+                        "${waiting.size} SMS ${if (waiting.size == 1) "item" else "items"} up to this date ${if (waiting.size == 1) "is" else "are"} still waiting for review. " +
+                            "Reconciling confirms ${if (waiting.size == 1) "it" else "them"} with the suggested category" +
+                            (if (duplicates > 0) ", and sets aside $duplicates suspected duplicate${if (duplicates == 1) "" else "s"}" else "") +
+                            ". Review first if you want to change anything.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+
                 // Guardrail/Lock Warning Information Banner
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f),

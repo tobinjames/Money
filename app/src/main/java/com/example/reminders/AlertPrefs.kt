@@ -35,6 +35,14 @@ object AlertPrefs {
     fun reconcileAlerts(context: Context) = prefs(context).getBoolean("reconcile_alerts", true)
     fun setReconcileAlerts(context: Context, on: Boolean) = prefs(context).edit().putBoolean("reconcile_alerts", on).apply()
 
+    /** Ask for fingerprint, face or the phone's PIN before showing the app. */
+    fun appLock(context: Context) = prefs(context).getBoolean("app_lock", false)
+    fun setAppLock(context: Context, on: Boolean) = prefs(context).edit().putBoolean("app_lock", on).apply()
+
+    /** A summary of last month, sent in the first days of each month. */
+    fun monthlySummary(context: Context) = prefs(context).getBoolean("monthly_summary", true)
+    fun setMonthlySummary(context: Context, on: Boolean) = prefs(context).edit().putBoolean("monthly_summary", on).apply()
+
     /** Alert when Free to spend drops below this amount. */
     fun lowBalanceAlerts(context: Context) = prefs(context).getBoolean("low_balance_alerts", true)
     fun setLowBalanceAlerts(context: Context, on: Boolean) = prefs(context).edit().putBoolean("low_balance_alerts", on).apply()

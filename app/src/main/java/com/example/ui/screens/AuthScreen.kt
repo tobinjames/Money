@@ -120,10 +120,10 @@ fun AuthScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Image(
-                            painter = painterResource(id = R.drawable.app_logo_emblem_1786874063889),
+                            painter = painterResource(id = R.drawable.app_logo),
                             contentDescription = "Family Expense Tracker Logo",
                             modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
+                            contentScale = ContentScale.Fit
                         )
                     }
                 }

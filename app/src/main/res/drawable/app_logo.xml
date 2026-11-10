@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app logo for use inside the app (sign-in screen): the launcher icon on a rounded tile. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M24,0 L84,0 Q108,0 108,24 L108,84 Q108,108 84,108 L24,108 Q0,108 0,84 L0,24 Q0,0 24,0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108">
+                <item android:color="#FF14B8A6" android:offset="0.0" />
+                <item android:color="#FF0F5F59" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.2"
+        android:scaleY="1.2">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.92"
+        android:scaleY="0.92">
+        <!-- Home -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M54,26.5 L81.5,50.2 Q83,51.6 81,52.4 L75,52.4 L75,77.5 Q75,81 71.5,81 L36.5,81 Q33,81 33,77.5 L33,52.4 L27,52.4 Q25,51.6 26.5,50.2 Z" />
+        <!-- Rupee sign -->
+        <path
+            android:strokeColor="#FF0F766E"
+            android:strokeWidth="4"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M44,57 L64,57 M44,63.5 L64,63.5 M50,57 C56.5,57 59,60 59,63.5 C59,67 56,70 50.5,70 L45,70 L58,78.5" />
+        <!-- Coin -->
+        <path
+            android:fillColor="#FFFBBF24"
+            android:pathData="M73,34 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+        <path
+            android:strokeColor="#FFB45309"
+            android:strokeWidth="1.6"
+            android:pathData="M73,34 m-3.6,0 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0" />
+    </group>
+    </group>
+</vector>

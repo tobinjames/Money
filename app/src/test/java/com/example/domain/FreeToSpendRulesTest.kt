@@ -122,4 +122,33 @@ class FreeToSpendRulesTest {
         val r = Reserve(amount = 6_000.0, target = 24_000.0, targetDate = time(2027, 5, 1))
         assertEquals(3_000.0, FreeToSpendRules.neededPerMonth(r, time(2026, 11, 20))!!, 0.01)
     }
+
+    @Test
+    fun unreviewedCardSpendAlreadyLowersFreeToSpend() {
+        val now = time(2026, 11, 9)
+        val spend = LedgerRules.toLedger(
+            Transaction(amount = 20_000.0, type = TransactionType.EXPENSE, accountId = "myCard", category = "Shopping",
+                date = time(2026, 11, 8), timestamp = time(2026, 11, 8), status = com.example.data.TransactionStatus.PENDING_REVIEW)
+        )
+        val before = FreeToSpendRules.compute(me, accounts, emptyList(), emptyList(), emptyList(), 0, now)
+        val after = FreeToSpendRules.compute(me, accounts, listOf(spend), emptyList(), emptyList(), 0, now)
+        assertEquals(before.freeToSpend - 20_000.0, after.freeToSpend, 0.01)
+        assertEquals(20_000.0, after.unreviewed, 0.01)
+        assertEquals(1, after.unreviewedCount)
+    }
+
+    @Test
+    fun loanEmiCountsUntilThisMonthsPaymentShowsUp() {
+        val now = time(2026, 11, 9)
+        val loan = Account(accountId = "loan", accountType = "LIABILITY", customMainCategory = "Loans", monthlyEmi = 15_000.0, asOfDate = 0L, ownerUserId = me)
+        val all = accounts + loan
+        val base = FreeToSpendRules.compute(me, accounts, emptyList(), emptyList(), emptyList(), 0, now)
+        val unpaid = FreeToSpendRules.compute(me, all, emptyList(), emptyList(), emptyList(), 0, now)
+        assertEquals(base.freeToSpend - 15_000.0, unpaid.freeToSpend, 0.01)
+        val payment = LedgerRules.toLedger(
+            Transaction(amount = 14_000.0, type = TransactionType.TRANSFER, accountId = "theirBank", targetAccountId = "loan",
+                date = time(2026, 11, 5), timestamp = time(2026, 11, 5), isLoanEmi = true)
+        )
+        assertEquals(0, FreeToSpendRules.compute(me, all, listOf(payment), emptyList(), emptyList(), 0, now).emis.size)
+    }
 }
