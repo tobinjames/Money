@@ -8,6 +8,7 @@ import com.example.data.TransactionStatus
 import com.example.data.TransactionType
 import java.util.Calendar
 import kotlin.math.abs
+import kotlin.math.min
 
 /**
  * Pure accounting rules, kept free of Android and Firebase so they can be unit tested.
@@ -18,6 +19,60 @@ object LedgerRules {
 
     /** Two SMS for one self-transfer usually arrive within minutes; allow for slow IMPS/NEFT. */
     const val TRANSFER_MATCH_WINDOW_MS = 2L * 60 * 60 * 1000
+
+    /** A card payment's two SMS (bank debit, card "payment received") can be days apart. */
+    const val CARD_PAYMENT_MATCH_WINDOW_MS = 4L * 24 * 60 * 60 * 1000
+
+    /** Change in an investment's value found when reconciling: not spending and not income. */
+    const val INVESTMENT_CHANGE_CATEGORY = "Investment Gain/Loss"
+
+    const val LOAN_INTEREST_CATEGORY = "Finance: Loan Interest"
+
+    /**
+     * Whether a transaction moves a balance. Confirmed ones do, and so do ones still waiting for
+     * review: their amount and account are known, only the category is unsure, and leaving them
+     * out would overstate the money in hand. Ignored ones and suspected duplicates do not.
+     */
+    fun countsInBalance(t: Transaction): Boolean =
+        !t.isIgnored && (t.status == TransactionStatus.CONFIRMED || !t.isProbablyDuplicate)
+
+    /** Confirmed and not ignored: what spending, income and budgets are worked out from. */
+    fun isCounted(t: Transaction): Boolean = !t.isIgnored && t.status == TransactionStatus.CONFIRMED
+
+    /** Categories that are neither spending nor income (investment value changes). */
+    fun isNonSpending(category: String): Boolean = category.trim().equals(INVESTMENT_CHANGE_CATEGORY, ignoreCase = true)
+
+    /**
+     * What a transaction adds to spending: an expense adds its amount, a refund (income recorded
+     * against an expense category) takes it back, anything else is 0.
+     */
+    fun spendOf(t: Transaction, isExpenseCategory: (String) -> Boolean): Double = when {
+        !isCounted(t) || isNonSpending(t.category) -> 0.0
+        t.type == TransactionType.EXPENSE -> t.amount
+        t.type == TransactionType.INCOME && isExpenseCategory(t.category.trim()) -> -t.amount
+        else -> 0.0
+    }
+
+    /** What a transaction adds to income: real income only, not refunds or investment changes. */
+    fun incomeOf(t: Transaction, isExpenseCategory: (String) -> Boolean): Double =
+        if (isCounted(t) && t.type == TransactionType.INCOME && !isNonSpending(t.category) && !isExpenseCategory(t.category.trim())) t.amount else 0.0
+
+    /**
+     * Splits a loan payment into interest and principal. Interest is one month on what is
+     * outstanding, never more than the payment, and only on the first payment of the month:
+     * a second payment or a part-prepayment in the same month is all principal.
+     */
+    fun emiSplit(amount: Double, outstanding: Double, annualRate: Double, interestAlreadyCharged: Boolean): Pair<Double, Double> {
+        if (interestAlreadyCharged || annualRate <= 0.0 || outstanding <= 0.0) return Pair(0.0, amount)
+        val interest = min(amount, outstanding * (annualRate / 100.0) / 12.0)
+        return Pair(interest, amount - interest)
+    }
+
+    /** Whether a payment into [loanId] (a principal transfer) was already recorded in the month of [time]. */
+    fun loanPaidInMonth(loanId: String, ledgerTxs: List<Transaction>, time: Long): Boolean {
+        val (start, end) = monthBounds(time)
+        return ledgerTxs.any { !it.isIgnored && it.isLoanEmi && it.debitAccountId == loanId && it.date in start until end }
+    }
 
     private val NOT_A_TRANSFER_WORDS = listOf("refund", "reversal", "reversed", "cashback", "chargeback")
 
@@ -59,7 +114,7 @@ object LedgerRules {
         var debitSum = 0.0
         var creditSum = 0.0
         for (t in ledgerTxs) {
-            if (t.isIgnored || t.status != TransactionStatus.CONFIRMED || (upTo != null && t.date > upTo)) continue
+            if (!countsInBalance(t) || (upTo != null && t.date > upTo)) continue
             if (t.debitAccountId == account.accountId) debitSum += t.amount
             if (t.creditAccountId == account.accountId) creditSum += t.amount
         }
@@ -74,7 +129,7 @@ object LedgerRules {
         val debits = HashMap<String, Double>()
         val credits = HashMap<String, Double>()
         for (t in ledgerTxs) {
-            if (t.isIgnored || t.status != TransactionStatus.CONFIRMED) continue
+            if (!countsInBalance(t)) continue
             debits[t.debitAccountId] = (debits[t.debitAccountId] ?: 0.0) + t.amount
             credits[t.creditAccountId] = (credits[t.creditAccountId] ?: 0.0) + t.amount
         }
@@ -124,7 +179,8 @@ object LedgerRules {
             date = closingDate,
             timestamp = closingDate,
             type = type,
-            category = RECONCILIATION_CATEGORY,
+            // A fund or deposit changing value is not spending or income.
+            category = if (account.type == AccountType.FIXED_DEPOSIT || account.type == AccountType.MUTUAL_FUND) INVESTMENT_CHANGE_CATEGORY else RECONCILIATION_CATEGORY,
             accountId = account.accountId,
             payeeName = "Statement reconciliation",
             narration = "Statement reconciliation",
@@ -147,13 +203,18 @@ object LedgerRules {
         isCredit: Boolean,
         accountId: String,
         ownAccountIds: Set<String>,
-        smsBody: String
+        smsBody: String,
+        cardAccountIds: Set<String> = emptySet()
     ): Transaction? {
         if (looksLikeRefund(smsBody)) return null
         return history
             .filter { tx ->
+                // A bank debit and the card's "payment received" for it: the card is the side credited.
+                val cardPayment = if (isCredit) accountId in cardAccountIds && tx.accountId !in cardAccountIds
+                    else tx.accountId in cardAccountIds && accountId !in cardAccountIds
+                val window = if (cardPayment) CARD_PAYMENT_MATCH_WINDOW_MS else TRANSFER_MATCH_WINDOW_MS
                 abs(tx.amount - amount) < 0.01 &&
-                    abs(tx.timestamp - timestamp) <= TRANSFER_MATCH_WINDOW_MS &&
+                    abs(tx.timestamp - timestamp) <= window &&
                     tx.accountId != accountId &&
                     tx.accountId in ownAccountIds &&
                     !tx.isIgnored &&
@@ -163,6 +224,28 @@ object LedgerRules {
             }
             .minByOrNull { abs(it.timestamp - timestamp) }
     }
+
+    /**
+     * A transfer already recorded from the other side's SMS, which this SMS is the second half
+     * of: a credit into [accountId], or a debit from [accountId] that went to one of the cards.
+     * [alreadyHas] says whether a saved transfer already includes this side's SMS.
+     */
+    fun findRecordedTransfer(
+        history: List<Transaction>,
+        amount: Double,
+        timestamp: Long,
+        isCredit: Boolean,
+        accountId: String,
+        cardAccountIds: Set<String>,
+        alreadyHas: (Transaction) -> Boolean
+    ): Transaction? =
+        history.filter { tx ->
+            tx.type == TransactionType.TRANSFER && !tx.isIgnored && tx.originalSmsText != null &&
+                abs(tx.amount - amount) < 0.01 &&
+                abs(tx.timestamp - timestamp) <= CARD_PAYMENT_MATCH_WINDOW_MS &&
+                (if (isCredit) tx.targetAccountId == accountId else tx.accountId == accountId && tx.targetAccountId in cardAccountIds) &&
+                !alreadyHas(tx)
+        }.minByOrNull { abs(it.timestamp - timestamp) }
 
     private fun looksLikeRefund(text: String): Boolean {
         val lower = text.lowercase()
@@ -196,15 +279,13 @@ object LedgerRules {
         grouping: (String) -> Pair<String, String>
     ): Double {
         val (start, end) = monthBounds(now)
-        return txs.filter {
-            it.status == TransactionStatus.CONFIRMED && !it.isIgnored && it.timestamp in start until end &&
-                (it.type == TransactionType.EXPENSE ||
-                    (it.type == TransactionType.INCOME && isExpenseCategory(it.category.trim())))
-        }.filter {
-            val category = it.category.trim()
+        return txs.filter { it.timestamp in start until end }.sumOf { tx ->
+            val amount = spendOf(tx, isExpenseCategory)
+            if (amount == 0.0) return@sumOf 0.0
+            val category = tx.category.trim()
             val (main, sub) = grouping(category)
-            budgetMatches(budget, category, main, sub)
-        }.sumOf { if (it.type == TransactionType.INCOME) -it.amount else it.amount }
+            if (budgetMatches(budget, category, main, sub)) amount else 0.0
+        }
     }
 
     fun monthBounds(time: Long): Pair<Long, Long> {

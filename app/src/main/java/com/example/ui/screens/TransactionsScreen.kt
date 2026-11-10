@@ -576,9 +576,8 @@ fun TransactionsScreen(
 
                     val statementTxWithBalances = remember(allTransactions, selectedAccountFilterId, selectedAccountObj) {
                         val allAccTx = allTransactions.filter {
-                            !it.isIgnored &&
-                            it.status == TransactionStatus.CONFIRMED &&
-                            it.timestamp >= selectedAccountObj.asOfDate &&
+                            // The same entries the account's balance is worked out from.
+                            com.example.domain.LedgerRules.countsInBalance(it) &&
                             (it.accountId == selectedAccountObj.id || it.targetAccountId == selectedAccountObj.id)
                         }.sortedBy { it.timestamp }
                         

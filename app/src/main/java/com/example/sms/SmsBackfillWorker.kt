@@ -88,32 +88,17 @@ class SmsBackfillWorker(
 
             if (cursor != null) {
                 var count = 0
-                val existingTxs = FirebaseService.getTransactions().first()
-
                 while (cursor.moveToNext()) {
                     val sender = cursor.getString(0) ?: ""
                     val body = cursor.getString(1) ?: ""
                     val dateMillis = cursor.getLong(2)
-
-                    // Sender match: check if matches targetSenders
-                    val isMatchedSender = targetSenders.any { s -> com.example.domain.SenderRules.matches(sender, s) }
-                    if (!isMatchedSender) continue
-
-                    // Content privacy check
-                    val hasPrivacyKeyword = privacyKeywords.any { 
-                        body.lowercase().contains(it.keyword.lowercase().trim()) 
-                    }
-                    if (hasPrivacyKeyword) continue
-
-                    // Duplicate check
-                    val isDuplicate = existingTxs.any { tx ->
-                        tx.timestamp == dateMillis && (tx.originalSmsText == body || tx.originalSmsText?.contains(body) == true || body.contains(tx.originalSmsText ?: "_"))
-                    }
-                    
-                    if (!isDuplicate) {
-                        Log.d("SmsBackfillWorker", "Discovered valid historical SMS from $sender received at $dateMillis. Backfilling transaction...")
-                        SmsProcessor.processSms(context, sender, body, dateMillis)
+                    if (targetSenders.none { s -> com.example.domain.SenderRules.matches(sender, s) }) continue
+                    // SmsProcessor skips anything already handled, private, or not a transaction.
+                    try {
+                        if (!SmsProcessor.processSms(context, sender, body, dateMillis)) break
                         count++
+                    } catch (e: Exception) {
+                        Log.w("SmsBackfillWorker", "Skipped one SMS: ${e.message}")
                     }
                 }
                 cursor.close()

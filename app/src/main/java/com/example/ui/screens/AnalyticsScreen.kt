@@ -148,10 +148,16 @@ fun AnalyticsScreen(
             .mapValues { entry -> entry.value.sumOf { it.amount } }
     }
 
+    // One definition of spending and income, shared with budgets: confirmed, not ignored,
+    // refunds taken off spending (not added to income), investment value changes left out.
+    val isExpenseCat = remember(categoriesState) { com.example.domain.BudgetRules.isExpenseCategory(categoriesState) }
+    val spendOf = { tx: Transaction -> com.example.domain.LedgerRules.spendOf(tx, isExpenseCat) }
+    val incomeOf = { tx: Transaction -> com.example.domain.LedgerRules.incomeOf(tx, isExpenseCat) }
+
     // 1. Filter transactions by user tab selection for Analytics Insights
     val userFilteredTransactions = rememberInBackground(emptyList<Transaction>(), transactionsState, selectedUserTab, name1, name2) {
         transactionsState.filter { tx ->
-            if (tx.status != TransactionStatus.CONFIRMED) return@filter false
+            if (!com.example.domain.LedgerRules.isCounted(tx)) return@filter false
             val curId = viewModel.currentUserUid.value
             val spId = viewModel.spouseUserUid.value
             when (selectedUserTab) {
@@ -166,7 +172,8 @@ fun AnalyticsScreen(
     val periodTransactions = remember(userFilteredTransactions, selectedPeriod, customStartDate, customEndDate) {
         val now = System.currentTimeMillis()
         val limitTime = when (selectedPeriod) {
-            AnalyticsPeriod.MONTHLY -> now - (30L * 24 * 60 * 60 * 1000)
+            // This calendar month, the same month budgets use.
+            AnalyticsPeriod.MONTHLY -> com.example.domain.LedgerRules.monthBounds(now).first
             AnalyticsPeriod.QUARTERLY -> now - (90L * 24 * 60 * 60 * 1000)
             AnalyticsPeriod.YTD -> {
                 val cal = Calendar.getInstance()
@@ -190,13 +197,9 @@ fun AnalyticsScreen(
     }
     
     // 3. Calculate summary metrics (Income, Expenses, Investment / SIP)
-    val totalIncome = remember(periodTransactions) {
-        periodTransactions.filter { it.type == TransactionType.INCOME }.sumOf { it.amount }
-    }
+    val totalIncome = remember(periodTransactions, isExpenseCat) { periodTransactions.sumOf { incomeOf(it) } }
     
-    val totalExpenses = remember(periodTransactions) {
-        periodTransactions.filter { it.type == TransactionType.EXPENSE }.sumOf { it.amount }
-    }
+    val totalExpenses = remember(periodTransactions, isExpenseCat) { periodTransactions.sumOf { spendOf(it) } }
     
     val netSavings = totalIncome - totalExpenses
     
@@ -214,14 +217,13 @@ fun AnalyticsScreen(
     }
 
     // 4. Calculate individual category spending
-    val categoryBreakdown = remember(periodTransactions) {
-        val expenseTransactions = periodTransactions.filter { it.type == TransactionType.EXPENSE }
+    val categoryBreakdown = remember(periodTransactions, isExpenseCat) {
         val totals = mutableMapOf<String, Double>()
-        expenseTransactions.forEach { tx ->
-            val current = totals[tx.category] ?: 0.0
-            totals[tx.category] = current + tx.amount
+        periodTransactions.forEach { tx ->
+            val spend = spendOf(tx)
+            if (spend != 0.0) totals[tx.category] = (totals[tx.category] ?: 0.0) + spend
         }
-        totals.entries.sortedByDescending { it.value }
+        totals.entries.filter { it.value > 0.0 }.sortedByDescending { it.value }
     }
     
     val maxCategoryValue = remember(categoryBreakdown) {
@@ -244,7 +246,7 @@ fun AnalyticsScreen(
     }
 
     // 5. Multi-Month Trend Summaries (Last 6 Months) for MoM & Cash Flow
-    val monthlySummaries = rememberInBackground(emptyList<MonthlyMetric>(), transactionsState, name1, name2) {
+    val monthlySummaries = rememberInBackground(emptyList<MonthlyMetric>(), transactionsState, name1, name2, categoriesState) {
         val result = mutableListOf<MonthlyMetric>()
         val cal = Calendar.getInstance()
         cal.set(Calendar.DAY_OF_MONTH, 1)
@@ -272,11 +274,11 @@ fun AnalyticsScreen(
             val endM = endCal.timeInMillis
 
             val monthTxs = transactionsState.filter { 
-                it.status == TransactionStatus.CONFIRMED && it.timestamp in startM..endM 
+                com.example.domain.LedgerRules.isCounted(it) && it.timestamp in startM..endM 
             }
             
-            val inc = monthTxs.filter { it.type == TransactionType.INCOME }.sumOf { it.amount }
-            val exp = monthTxs.filter { it.type == TransactionType.EXPENSE }.sumOf { it.amount }
+            val inc = monthTxs.sumOf { incomeOf(it) }
+            val exp = monthTxs.sumOf { spendOf(it) }
             val net = inc - exp
             val sRate = if (inc > 0) (net / inc) * 100.0 else 0.0
             
@@ -284,8 +286,9 @@ fun AnalyticsScreen(
             val u2 = monthTxs.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 2" || it.ownerFirstName.equals(name2, ignoreCase = true) || it.ownerUserId == spId || it.paidByUserId == spId) }.sumOf { it.amount }
 
             val catMap = mutableMapOf<String, Double>()
-            monthTxs.filter { it.type == TransactionType.EXPENSE }.forEach { tx ->
-                catMap[tx.category] = (catMap[tx.category] ?: 0.0) + tx.amount
+            monthTxs.forEach { tx ->
+                val spend = spendOf(tx)
+                if (spend != 0.0) catMap[tx.category] = (catMap[tx.category] ?: 0.0) + spend
             }
 
             result.add(

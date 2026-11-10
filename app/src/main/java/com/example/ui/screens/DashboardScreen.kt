@@ -70,6 +70,7 @@ fun DashboardScreen(
     val accountsState by viewModel.filteredAccounts.collectAsState()
     val allAccountsState by viewModel.accounts.collectAsState()
     val transactionsState by viewModel.filteredTransactions.collectAsState()
+    val allTransactionsState by viewModel.transactions.collectAsState()
     val categoriesState by viewModel.categories.collectAsState(initial = emptyList())
     
     val activeFilter by viewModel.currentFilter.collectAsState()
@@ -93,27 +94,24 @@ fun DashboardScreen(
     val smsReceivePermission = rememberPermissionState(permission = Manifest.permission.RECEIVE_SMS)
     
     // Categorize spend types for doughnut display: current month only
-    val categoryTotals = rememberInBackground(emptyMap<String, Double>(), transactionsState, activeScope) {
+    val categoryTotals = rememberInBackground(emptyMap<String, Double>(), transactionsState, activeScope, categoriesState) {
         val totals = mutableMapOf<String, Double>()
         val calCurrent = Calendar.getInstance()
         val currentYear = calCurrent.get(Calendar.YEAR)
         val currentMonth = calCurrent.get(Calendar.MONTH)
         val calTx = Calendar.getInstance()
 
-        transactionsState
-            .filter { tx ->
-                if (tx.status != TransactionStatus.CONFIRMED) return@filter false
-                if (tx.type != TransactionType.EXPENSE) return@filter false
-                calTx.timeInMillis = tx.timestamp
-                val txYear = calTx.get(Calendar.YEAR)
-                val txMonth = calTx.get(Calendar.MONTH)
-                txYear == currentYear && txMonth == currentMonth
+        // Spending as budgets count it: confirmed, not ignored, refunds taken off.
+        val isExpenseCategory = com.example.domain.BudgetRules.isExpenseCategory(categoriesState)
+        transactionsState.forEach { tx ->
+            val spend = com.example.domain.LedgerRules.spendOf(tx, isExpenseCategory)
+            if (spend == 0.0) return@forEach
+            calTx.timeInMillis = tx.timestamp
+            if (calTx.get(Calendar.YEAR) == currentYear && calTx.get(Calendar.MONTH) == currentMonth) {
+                totals[tx.category] = (totals[tx.category] ?: 0.0) + spend
             }
-            .forEach { tx ->
-                val current = totals[tx.category] ?: 0.0
-                totals[tx.category] = current + tx.amount
-            }
-        totals
+        }
+        totals.filterValues { it > 0.0 }
     }
 
     LazyColumn(
@@ -132,7 +130,7 @@ fun DashboardScreen(
                 ) {
                     Column {
                         val welcomeSubtitle = when (activeFilter) {
-                            ViewFilter.Combined -> "Personal & Family"
+                            ViewFilter.Combined -> "Joint accounts"
                             ViewFilter.User1 -> "$myNameStr's View"
                             ViewFilter.User2 -> "$spouseNameStr's View"
                         }
@@ -599,7 +597,8 @@ fun DashboardScreen(
         }
 
         // PENDING REVIEW TRANSACTIONS (Requires Manual Intervention)
-        val pendingReviews = transactionsState.filter { 
+        // Everything waiting for review in the household, whichever view is selected above.
+        val pendingReviews = allTransactionsState.filter { 
             (it.status == TransactionStatus.PENDING_REVIEW || it.category.equals("Unknown", ignoreCase = true)) && !it.isIgnored 
         }
         if (pendingReviews.isNotEmpty()) {
@@ -616,7 +615,7 @@ fun DashboardScreen(
             items(pendingReviews, key = { it.id }) { tx ->
                 var showIgnoreConfirm by remember { mutableStateOf(false) }
                 
-                val matchingAcc = accountsState.find { it.id == tx.accountId }
+                val matchingAcc = allAccountsState.find { it.id == tx.accountId }
                 val isLocked = matchingAcc?.takeIf { it.accountType == "ASSET" || it.accountType == "LIABILITY" }?.lastReconciledDate?.let { tx.timestamp < it && !isSameDay(tx.timestamp, it) } ?: false
 
                 Card(

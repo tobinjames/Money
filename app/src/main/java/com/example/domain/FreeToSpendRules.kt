@@ -51,7 +51,10 @@ object FreeToSpendRules {
         val reserves: List<Reserve>,
         /** Bills due up to this time are counted. */
         val horizon: Long,
-        val freeToSpend: Double
+        val freeToSpend: Double,
+        /** Of the figures above, the part from SMS items not yet reviewed (already counted). */
+        val unreviewed: Double = 0.0,
+        val unreviewedCount: Int = 0
     )
 
     /** An account or reminder owner that counts for [myUid]: theirs, or joint. */
@@ -91,7 +94,7 @@ object FreeToSpendRules {
         val paid = ReminderRules.paymentsSince(card, txs, cycle.statementDate)
         val billed = min(owed, max(0.0, statement - paid))
         val spent = txs.filter {
-            !it.isIgnored && it.status == TransactionStatus.CONFIRMED &&
+            LedgerRules.countsInBalance(it) &&
                 it.creditAccountId == card.accountId && it.date > cycle.statementDate && it.date <= now
         }.sumOf { it.amount }
         return CardLine(card, owed, billed, spent)
@@ -149,6 +152,11 @@ object FreeToSpendRules {
         val cardDues = cards.sumOf { it.owed }
         val upcoming = bills.sumOf { it.reminder.amount }
         val reserved = myReserves.sumOf { it.amount }
+        val counted = (liquid.map { it.first.accountId } + mine.filter { isCard(it) }.map { it.accountId }).toSet()
+        val pending = txs.filter {
+            it.status == TransactionStatus.PENDING_REVIEW && LedgerRules.countsInBalance(it) &&
+                (it.debitAccountId in counted || it.creditAccountId in counted)
+        }
         return Breakdown(
             bankAndCash = bankAndCash,
             accounts = liquid,
@@ -159,7 +167,9 @@ object FreeToSpendRules {
             reserved = reserved,
             reserves = myReserves,
             horizon = horizon,
-            freeToSpend = bankAndCash - cardDues - upcoming - reserved
+            freeToSpend = bankAndCash - cardDues - upcoming - reserved,
+            unreviewed = pending.sumOf { it.amount },
+            unreviewedCount = pending.size
         )
     }
 

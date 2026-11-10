@@ -608,7 +608,47 @@ object FirebaseService {
         write(COL_ACCOUNTS, category.accountId, category)
     }
 
-    suspend fun updateCategory(category: Account) = updateAccount(category)
+    /**
+     * Saves a category or account. Transactions, budgets and rules refer to a category by its
+     * name, so when an income or expense category is renamed they are moved to the new name.
+     */
+    suspend fun updateCategory(category: Account) {
+        val before = findAccountImmediate(category.accountId)
+        updateAccount(category)
+        val oldName = before?.accountName ?: return
+        val newName = category.accountName
+        val isCategory = category.accountType == "INCOME" || category.accountType == "EXPENSE"
+        if (!isCategory || oldName == newName || oldName.isBlank() || newName.isBlank()) return
+        // Another category still using the old name keeps its transactions.
+        if (localAccounts.value.any { it.accountId != category.accountId && it.accountName.equals(oldName, ignoreCase = true) }) return
+
+        fun same(s: String) = s.trim().equals(oldName, ignoreCase = true)
+        val txs = localTransactions.value.filter { it.type != TransactionType.TRANSFER && same(it.category) }
+            .map { LedgerRules.toLedger(it.copy(category = newName)) }
+        val budgets = localBudgets.value.filter { same(it.category) || same(it.subCategory) }.map {
+            it.copy(category = if (same(it.category)) newName else it.category, subCategory = if (same(it.subCategory)) newName else it.subCategory)
+        }
+        val rules = localMerchantRules.value.filter { same(it.assignedCategory) }.map { it.copy(assignedCategory = newName) }
+
+        val txIds = txs.associateBy { it.transactionId }
+        localTransactions.value = localTransactions.value.map { txIds[it.transactionId] ?: it }
+        olderTransactions.value = olderTransactions.value.map { txIds[it.transactionId] ?: it }
+        recentTransactions.value = recentTransactions.value.map { txIds[it.transactionId] ?: it }
+        budgets.forEach { b -> upsert(localBudgets, b) { it.budgetId == b.budgetId } }
+        rules.forEach { r -> upsert(localMerchantRules, r) { it.ruleId == r.ruleId } }
+
+        val fs = firestore ?: return
+        val writes: List<Pair<com.google.firebase.firestore.DocumentReference, Any>> =
+            txs.mapNotNull { t -> col(COL_TRANSACTIONS)?.document(t.transactionId)?.let { it to t } } +
+                budgets.mapNotNull { b -> col(COL_BUDGETS)?.document(b.budgetId)?.let { it to b } } +
+                rules.mapNotNull { r -> col(COL_RULES)?.document(r.ruleId)?.let { it to r } }
+        // Firestore takes at most 500 writes in one batch.
+        writes.chunked(400).forEach { chunk ->
+            val batch = fs.batch()
+            chunk.forEach { (ref, data) -> batch.set(ref, data, SetOptions.merge()) }
+            batch.commit().addOnFailureListener { Log.e(TAG, "Category rename not fully saved: ${it.message}") }
+        }
+    }
 
     suspend fun deleteCategory(categoryId: String) = deleteAccount(categoryId)
 
@@ -697,9 +737,20 @@ object FirebaseService {
         scheduleBudgetCheck()
     }
 
+    /** Whether an edit leaves every balance as it was (a new category, payee, note or tag). */
+    private fun sameMoney(a: Transaction, b: Transaction): Boolean =
+        a.amount == b.amount && a.date == b.date && a.type == b.type && a.accountId == b.accountId &&
+            (a.targetAccountId ?: "") == (b.targetAccountId ?: "") &&
+            LedgerRules.countsInBalance(a) == LedgerRules.countsInBalance(b)
+
     suspend fun updateTransaction(transaction: Transaction) {
         val ledgerTx = LedgerRules.toLedger(transaction)
-        checkNotInClosedPeriod(ledgerTx)
+        val before = localTransactions.value.find { it.transactionId == ledgerTx.transactionId }
+        // A reconciled period is locked for anything that would change a balance, not for relabelling.
+        if (before == null || !sameMoney(before, ledgerTx)) {
+            before?.let { checkNotInClosedPeriod(it) }
+            checkNotInClosedPeriod(ledgerTx)
+        }
         placeInOlder(ledgerTx)
         upsert(localTransactions, ledgerTx) { it.transactionId == ledgerTx.transactionId }
         write(COL_TRANSACTIONS, ledgerTx.transactionId, ledgerTx, merge = true)

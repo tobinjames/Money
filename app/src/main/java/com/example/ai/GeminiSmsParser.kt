@@ -24,7 +24,9 @@ data class ParsedTransactionResponse(
     val assignedAccount: String? = null,
     val matchedCategory: String? = null,
     val matchedAccount: String? = null,
-    val ignore: Boolean? = null
+    val ignore: Boolean? = null,
+    // Read by the simple on-phone reader because Gemini was unavailable: always needs review.
+    val fromBackup: Boolean = false
 )
 
 object GeminiSmsParser {
@@ -46,27 +48,7 @@ object GeminiSmsParser {
         categories: List<Account>,
         accountsList: List<Account>
     ): ParsedTransactionResponse? = withContext(Dispatchers.IO) {
-        val lowerText = rawText.lowercase()
-        val isStatementOrBillAlert = (
-            lowerText.contains("statement") ||
-            lowerText.contains("bill") ||
-            lowerText.contains("min due") ||
-            lowerText.contains("minimum due") ||
-            lowerText.contains("payment due") ||
-            lowerText.contains("total due") ||
-            lowerText.contains("due date")
-        ) && !(
-            lowerText.contains("debited") ||
-            lowerText.contains("credited") ||
-            lowerText.contains("withdrawn") ||
-            lowerText.contains("deposited") ||
-            lowerText.contains("received") ||
-            lowerText.contains("refund") ||
-            lowerText.contains("spent") ||
-            lowerText.contains("paid rs") ||
-            lowerText.contains("paid to")
-        )
-        if (isStatementOrBillAlert) {
+        if (com.example.domain.SmsRules.isStatementNotice(rawText)) {
             Log.d(TAG, "Local intercept: classified statement/bill notification as ignore.")
             return@withContext null
         }
@@ -163,7 +145,10 @@ object GeminiSmsParser {
         matchedCategory: String?,
         categories: List<Account>,
         accountsList: List<Account>
-    ): ParsedTransactionResponse {
+    ): ParsedTransactionResponse? {
+        // Without Gemini there is no way to tell an offer from a payment, so only messages that
+        // plainly say money moved are read; everything read this way goes to review.
+        if (!com.example.domain.SmsRules.looksLikeTransaction(smsText)) return null
         val lower = smsText.lowercase()
         val isCredit = lower.contains("credited") || lower.contains("received") || lower.contains("deposited") || lower.contains("refund")
         val isDebit = lower.contains("debited") || lower.contains("spent") || lower.contains("withdrawn") || lower.contains("paid for") || lower.contains("alert:")
@@ -188,9 +173,7 @@ object GeminiSmsParser {
             }
         }
         
-        if (vendor == "Unknown" || vendor.isEmpty()) {
-            vendor = "Local Transaction"
-        }
+        if (vendor.isEmpty()) vendor = "Unknown"
         
         // Suggested category mapping using intelligent multi-tier COA matching
         val suggestedCategory: String
@@ -210,7 +193,7 @@ object GeminiSmsParser {
                 if (acc.lastFourDigits.isBlank()) false
                 else {
                     val tokens = acc.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                    tokens.any { token -> smsText.contains(token) }
+                    tokens.any { token -> com.example.domain.SmsRules.namesDigits(smsText, token) }
                 }
             }
             // 2. Try matching by account name keywords (e.g., "HDFC", "ICICI")
@@ -233,7 +216,8 @@ object GeminiSmsParser {
             suggestedCategory = suggestedCategory,
             assignedAccount = matchedAccount?.accountName,
             matchedAccount = matchedAccount?.accountName,
-            matchedCategory = suggestedCategory
+            matchedCategory = suggestedCategory,
+            fromBackup = true
         )
     }
 

@@ -172,6 +172,8 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private fun notifyLowBalance(context: Context, b: FreeToSpendRules.Breakdown) {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val threshold = AlertPrefs.lowBalanceThreshold(context)
+            // Nothing set up yet (a new install): no accounts and no cards to judge by.
+            if (b.accounts.isEmpty() && b.cards.isEmpty()) return
             if (b.freeToSpend >= threshold) {
                 prefs.edit().putBoolean(LOW_SENT, false).apply()
                 return

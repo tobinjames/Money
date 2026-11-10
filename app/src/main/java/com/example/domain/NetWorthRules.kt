@@ -131,7 +131,7 @@ object NetWorthRules {
         val ends = starts.drop(1) + (now + 1)
 
         val txs = ledgerTxs.filter {
-            !it.isIgnored && it.status == TransactionStatus.CONFIRMED && it.date < ends.last() &&
+            LedgerRules.countsInBalance(it) && it.date < ends.last() &&
                 (it.debitAccountId in ids || it.creditAccountId in ids)
         }.sortedBy { it.date }
 

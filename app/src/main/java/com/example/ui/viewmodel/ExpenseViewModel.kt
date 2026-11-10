@@ -87,7 +87,7 @@ class ExpenseViewModel : ViewModel() {
     val spouseUserFirstName = FirebaseService.spouseUserFirstName
 
     // UI state filters
-    private val _currentFilter = MutableStateFlow<ViewFilter>(ViewFilter.Combined)
+    private val _currentFilter = MutableStateFlow<ViewFilter>(ViewFilter.User1)
     val currentFilter: StateFlow<ViewFilter> = _currentFilter.asStateFlow()
 
     private val _scopeFilter = MutableStateFlow<TransactionScope?>(null) // null means both
@@ -354,7 +354,13 @@ class ExpenseViewModel : ViewModel() {
                         val body = c.getString(bodyCol) ?: ""
                         val date = c.getLong(dateCol)
 
-                        val handled = SmsProcessor.processSms(context, sender, body, date)
+                        // One message that can't be saved must not hold up the ones after it.
+                        val handled = try {
+                            SmsProcessor.processSms(context, sender, body, date)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Reconciliation: skipped one SMS: ${e.message}")
+                            true
+                        }
                         if (!handled) break // not signed in yet; resume from here next time
                         // Move the cursor past every scanned SMS, bank or not, so the next scan
                         // doesn't start over from the last bank message.
@@ -397,14 +403,13 @@ class ExpenseViewModel : ViewModel() {
                 if (type == TransactionType.TRANSFER && potentialLoanAcc != null) {
                     // Manual transfer mapping representing EMI payment. Dynamically split interest component!
                     val loanAcc = potentialLoanAcc
-                    val outstanding = Math.abs(loanAcc.balance)
-                    val annualRate = loanAcc.annualInterestRate
-                    
-                    val interestComponent = (outstanding * (annualRate / 100.0)) / 12.0
-                    val principalComponent = (amount - interestComponent).coerceAtLeast(0.0)
-
+                    val (interestComponent, principalComponent) = LedgerRules.emiSplit(
+                        amount = amount,
+                        outstanding = Math.abs(loanAcc.balance),
+                        annualRate = loanAcc.annualInterestRate,
+                        interestAlreadyCharged = LedgerRules.loanPaidInMonth(loanAcc.id, transactions.value, dateMillis)
+                    )
                     // The loan balance comes from the ledger: the principal transfer below reduces it.
-
                     // Track principal transfer transaction
                     val principalTx = Transaction(
                         id = UUID.randomUUID().toString(),
@@ -424,14 +429,14 @@ class ExpenseViewModel : ViewModel() {
                         principalComponent = principalComponent,
                         tag = tag.trim()
                     )
-                    FirebaseService.addTransaction(principalTx)
+                    if (principalComponent > 0.0) FirebaseService.addTransaction(principalTx)
 
                     // Track interest expense transaction
                     val interestTx = Transaction(
                         id = UUID.randomUUID().toString(),
                         amount = interestComponent,
                         type = TransactionType.EXPENSE,
-                        category = "Finance: Loan Interest",
+                        category = LedgerRules.LOAN_INTEREST_CATEGORY,
                         timestamp = dateMillis,
                         accountId = accountId,
                         paidByUserId = paidBy,
@@ -444,7 +449,7 @@ class ExpenseViewModel : ViewModel() {
                         interestComponent = interestComponent,
                         tag = tag.trim()
                     )
-                    FirebaseService.addTransaction(interestTx)
+                    if (interestComponent > 0.0) FirebaseService.addTransaction(interestTx)
                     return@launch
                 }
 
@@ -473,98 +478,34 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
-    fun exportTransactionsCsv(
-        context: Context,
-        txList: List<Transaction>,
-        title: String = "NestWise_Transactions_Report"
-    ) {
-        try {
-            val simpleDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
-            val accountsMap = accounts.value.associate { it.id to it.name }
-            
-            val csvBuilder = StringBuilder()
-            csvBuilder.append("Date,Type,Category,Payee/Narration,Amount,Account,Target Account,Scope,Paid By,Tag,Status\n")
-            
-            txList.sortedByDescending { it.timestamp }.forEach { tx ->
-                val dateStr = simpleDateFormat.format(Date(tx.timestamp))
-                val typeStr = tx.type.name
-                val catStr = escapeCsv(tx.category)
-                val narrationStr = escapeCsv(tx.narration.ifEmpty { tx.payeeName })
-                val amountStr = String.format(Locale.US, "%.2f", tx.amount)
-                val accountName = escapeCsv(accountsMap[tx.accountId] ?: tx.accountId)
-                val targetAccountName = escapeCsv(tx.targetAccountId?.let { accountsMap[it] ?: it } ?: "")
-                val scopeStr = tx.scope.name
-                val paidByStr = escapeCsv(if (tx.ownerFirstName.isNotEmpty()) tx.ownerFirstName else tx.paidByUserId)
-                val tagStr = escapeCsv(tx.tag)
-                val statusStr = tx.status.name
-                
-                csvBuilder.append("$dateStr,$typeStr,$catStr,$narrationStr,$amountStr,$accountName,$targetAccountName,$scopeStr,$paidByStr,$tagStr,$statusStr\n")
-            }
-            
-            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, "$title - Export")
-                putExtra(Intent.EXTRA_TEXT, csvBuilder.toString())
-            }
-            val chooser = Intent.createChooser(sendIntent, "Export Transactions Report")
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(chooser)
-            triggerToast("Report generated successfully!")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error exporting CSV: ${e.message}", e)
-            triggerToast("Error exporting report: ${e.message}")
-        }
-    }
-
-    private fun escapeCsv(value: String): String {
-        val clean = value.replace("\"", "\"\"")
-        return if (clean.contains(",") || clean.contains("\n") || clean.contains("\"")) {
-            "\"$clean\""
-        } else {
-            clean
-        }
-    }
-
-    fun confirmPendingReview(transactionId: String, correctedCategory: String) {
-        viewModelScope.launch {
-            val oldTx = transactions.value.find { it.id == transactionId } ?: return@launch
-            val updated = oldTx.copy(
-                category = correctedCategory,
-                status = TransactionStatus.CONFIRMED
-            )
-            FirebaseService.updateTransaction(updated)
-        }
-    }
-
-    fun ignoreTransaction(transactionId: String) {
+    /** Runs a save and tells the user when it is refused (for example inside a reconciled period). */
+    private fun saving(what: String, action: suspend () -> Unit) {
         viewModelScope.launch {
             try {
-                FirebaseService.deleteTransaction(transactionId)
+                action()
             } catch (e: Exception) {
-                Log.e(TAG, "ignoreTransaction error: ${e.message}", e)
+                Log.e(TAG, "$what failed: ${e.message}")
+                val locked = e.message?.contains("closed reconciliation", ignoreCase = true) == true
+                triggerToast(
+                    if (locked) "Not saved: this date is before the account's last reconcile. Reconciled periods are locked."
+                    else "Not saved: ${e.message ?: "something went wrong"}"
+                )
             }
         }
     }
 
-    fun updateTransaction(transaction: Transaction) {
-        viewModelScope.launch {
-            try {
-                FirebaseService.updateTransaction(transaction)
-            } catch (e: Exception) {
-                Log.e("ExpenseViewModel", "Error updating transaction: ${e.message}")
-            }
-        }
+    fun confirmPendingReview(transactionId: String, correctedCategory: String) = saving("Confirm") {
+        val oldTx = transactions.value.find { it.id == transactionId } ?: return@saving
+        FirebaseService.updateTransaction(
+            oldTx.copy(category = correctedCategory, status = TransactionStatus.CONFIRMED, isProbablyDuplicate = false)
+        )
     }
 
-    fun deleteTransaction(transactionId: String) {
-        viewModelScope.launch {
-            try {
-                FirebaseService.deleteTransaction(transactionId)
-            } catch (e: Exception) {
-                Log.e("ExpenseViewModel", "Error deleting transaction: ${e.message}")
-            }
-        }
-    }
+    fun ignoreTransaction(transactionId: String) = saving("Delete") { FirebaseService.deleteTransaction(transactionId) }
+
+    fun updateTransaction(transaction: Transaction) = saving("Update") { FirebaseService.updateTransaction(transaction) }
+
+    fun deleteTransaction(transactionId: String) = saving("Delete") { FirebaseService.deleteTransaction(transactionId) }
 
     fun addAccount(
         context: Context,
@@ -637,10 +578,8 @@ class ExpenseViewModel : ViewModel() {
                 customMainCategory = finalMain,
                 customSubCategory = finalSub
             )
+            // Saving the account also starts one background scan of older bank SMS for it.
             FirebaseService.addAccount(acc)
-            
-            // Trigger historical bank SMS scan
-            backfillHistoricalSmsForAccount(context, acc)
         }
     }
 
@@ -652,94 +591,38 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
-    private fun backfillHistoricalSmsForAccount(context: Context, account: Account) {
-        viewModelScope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Starting historical SMS backfill for account '${account.name}' (As of date: ${account.asOfDate})...")
-            
-            val uri = Uri.parse("content://sms/inbox")
-            val selection = "date >= ?"
-            val selectionArgs = arrayOf(account.asOfDate.toString())
-            val projection = arrayOf("address", "body", "date")
-            val sortOrder = "date ASC"
-
-            val cleanNameWords = account.name.split(Regex("[\\s_.-]+"))
-                .map { it.filter { c -> c.isLetterOrDigit() }.lowercase() }
-                .filter { it.length >= 3 }
-
-            if (cleanNameWords.isEmpty()) return@launch
-
-            try {
-                val cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)
-                cursor?.use { c ->
-                    val addressCol = c.getColumnIndexOrThrow("address")
-                    val bodyCol = c.getColumnIndexOrThrow("body")
-                    val dateCol = c.getColumnIndexOrThrow("date")
-
-                    var matchCount = 0
-                    while (c.moveToNext()) {
-                        val sender = c.getString(addressCol) ?: ""
-                        val body = c.getString(bodyCol) ?: ""
-                        val date = c.getLong(dateCol)
-
-                        val bodyLower = body.lowercase()
-                        val senderLower = sender.lowercase()
-
-                        val isKeywordMatch = cleanNameWords.any { word ->
-                            bodyLower.contains(word) || senderLower.contains(word)
-                        }
-
-                        if (isKeywordMatch) {
-                            Log.d(TAG, "Historical Scan Match: Processing message from $sender dated $date")
-                            SmsProcessor.processSms(context, sender, body, date)
-                            matchCount++
-                        }
-                    }
-                    Log.d(TAG, "Historical scan completed: processed $matchCount relevant bank transactions.")
-                }
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Historical scan canceled: Missing READ_SMS permission.")
-            } catch (e: Exception) {
-                Log.e(TAG, "Historical scan error: ${e.message}", e)
-            }
+    /** Items up to [closingDate] on this account that are still waiting for review. */
+    fun pendingBefore(accountId: String, closingDate: Long): List<Transaction> {
+        val end = LedgerRules.endOfDay(closingDate)
+        return transactions.value.filter {
+            it.status == TransactionStatus.PENDING_REVIEW && !it.isIgnored &&
+                (it.accountId == accountId || it.targetAccountId == accountId) && it.timestamp <= end
         }
     }
 
     fun reconcileAccount(accountId: String, closingDate: Long, statementBalance: Double) {
         viewModelScope.launch {
             val oldAcc = accounts.value.find { it.id == accountId } ?: return@launch
-
-            // Balances are computed from the ledger, so a difference from the statement is booked
-            // as an adjustment entry on the closing date (before the period is locked).
-            LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance)?.let { adjustment ->
-                try {
-                    FirebaseService.addTransaction(adjustment)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Could not post reconciliation adjustment: ${e.message}", e)
-                    triggerToast("Could not post the reconciliation adjustment: ${e.message}")
-                    return@launch
+            try {
+                // 1. Settle what is still waiting for review up to the closing date, before the
+                // period locks: items already counted in the balance are confirmed as they are,
+                // suspected duplicates (not counted) are set aside.
+                pendingBefore(accountId, closingDate).forEach { tx ->
+                    FirebaseService.updateTransaction(
+                        if (tx.isProbablyDuplicate) tx.copy(isIgnored = true) else tx.copy(status = TransactionStatus.CONFIRMED)
+                    )
                 }
+                // 2. Balances come from the ledger, so a difference from the statement is booked
+                // as an adjustment entry on the closing date.
+                LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance)
+                    ?.let { FirebaseService.addTransaction(it) }
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not reconcile: ${e.message}", e)
+                triggerToast("Could not reconcile: ${e.message}")
+                return@launch
             }
-
-            val updated = oldAcc.copy(
-                lastReconciledDate = closingDate,
-                reconciledBalance = statementBalance
-            )
-            FirebaseService.updateAccount(updated)
-            
-            // Auto-ignore all transactions pending review before locking date
-            val pendingBeforeLock = transactions.value.filter {
-                it.status == TransactionStatus.PENDING_REVIEW &&
-                (it.accountId == accountId || it.targetAccountId == accountId) &&
-                it.timestamp < closingDate &&
-                !it.isIgnored
-            }
-            pendingBeforeLock.forEach { tx ->
-                try {
-                    FirebaseService.updateTransaction(tx.copy(isIgnored = true))
-                } catch (e: Exception) {
-                    Log.e("ExpenseViewModel", "Error auto-ignoring pending transaction: ${e.message}")
-                }
-            }
+            // 3. Lock the period.
+            FirebaseService.updateAccount(oldAcc.copy(lastReconciledDate = closingDate, reconciledBalance = statementBalance))
         }
     }
 
@@ -980,7 +863,7 @@ class ExpenseViewModel : ViewModel() {
                             if (acc.lastFourDigits.isBlank()) false
                             else {
                                 val tokens = acc.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                                tokens.any { token -> smsBody.contains(token) }
+                                tokens.any { token -> com.example.domain.SmsRules.namesDigits(smsBody, token) }
                             }
                         }
                         if (matchedByDigits != null) {

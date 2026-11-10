@@ -72,6 +72,13 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
                 else "Bank and cash after card dues, bills before ${if (salaryDay in 1..31) "salary" else "the next 30 days"} and reserves.",
                 style = MaterialTheme.typography.bodySmall
             )
+            if (breakdown.unreviewedCount > 0) {
+                Text(
+                    "Includes ${formatAmount(breakdown.unreviewed)} from ${breakdown.unreviewedCount} SMS ${if (breakdown.unreviewedCount == 1) "item" else "items"} waiting for your review.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
 
             if (!expanded) {
                 Text(

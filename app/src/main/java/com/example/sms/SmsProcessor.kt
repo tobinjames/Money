@@ -5,505 +5,370 @@ import android.util.Log
 import com.example.ai.GeminiSmsParser
 import com.example.ai.ParsedTransactionResponse
 import com.example.data.*
-import kotlinx.coroutines.flow.first
+import com.example.domain.FreeToSpendRules
 import com.example.domain.LedgerRules
+import com.example.domain.SenderRules
+import com.example.domain.SmsRules
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
+/**
+ * Turns one bank SMS into a transaction. Every path that reads SMS (a new message, the catch-up
+ * when the app opens, the scan after adding an account) comes through [processSms], one message
+ * at a time, and each message is handled once (see [SmsLog]).
+ */
 object SmsProcessor {
     private const val TAG = "SmsProcessor"
     private const val PREFS_NAME = "expense_tracker_prefs"
     private const val KEY_LAST_PROCESSED_TIMESTAMP = "last_processed_sms_timestamp"
+    private const val DEBIT_MARK = "[Debit SMS]: "
+    private const val CREDIT_MARK = "[Credit SMS]: "
 
-    /**
-     * LOCAL PRE-FILTERING PIPELINE (Security & Cost guardrail)
-     */
+    // One message at a time, so two scans can't both save the same SMS.
+    private val lock = Mutex()
+
+    /** Keeps only SMS from a saved bank sender that aren't private (OTP...) or statement notices. */
     fun preFilterSms(
         sender: String,
         body: String,
         whitelistedSenders: List<WhitelistedSender>,
         privacyKeywords: List<PrivacyKeyword>
     ): Boolean {
-        val cleanBody = body.lowercase()
-        val cleanSender = sender.lowercase().trim()
-
-        // 1. Sender check: keep only SMS whose header carries a saved bank sender ID.
-        val isWhitelisted = whitelistedSenders.any { com.example.domain.SenderRules.matches(cleanSender, it.senderId) }
-        if (!isWhitelisted) {
-            Log.d(TAG, "Pre-filter: Rejected SMS. Sender '$sender' is not whitelisted.")
-            return false
-        }
-
-        // 2. Content Keyword Guardrail (OTP, Password, PIN, Login verification, etc.)
-        val hasPrivacyKeyword = privacyKeywords.any { 
-            cleanBody.contains(it.keyword.lowercase().trim()) 
-        }
-        if (hasPrivacyKeyword) {
-            Log.d(TAG, "Pre-filter: Rejected SMS containing security sensitive privacy keywords.")
-            return false
-        }
-
-        // 3. Statement / Bill Alert Pre-filter (Ignore statement generated alerts, minimum due notifications, reminders)
-        val isStatementOrBillAlert = (
-            cleanBody.contains("statement") ||
-            cleanBody.contains("bill") ||
-            cleanBody.contains("min due") ||
-            cleanBody.contains("minimum due") ||
-            cleanBody.contains("payment due") ||
-            cleanBody.contains("total due") ||
-            cleanBody.contains("due date")
-        ) && !(
-            cleanBody.contains("debited") ||
-            cleanBody.contains("credited") ||
-            cleanBody.contains("withdrawn") ||
-            cleanBody.contains("deposited") ||
-            cleanBody.contains("received") ||
-            cleanBody.contains("refund") ||
-            cleanBody.contains("spent") ||
-            cleanBody.contains("paid rs") ||
-            cleanBody.contains("paid to")
-        )
-        if (isStatementOrBillAlert) {
-            Log.d(TAG, "Pre-filter: Rejected SMS. It is a statement notification or bill reminder, not an active spend/credit transaction.")
-            return false
-        }
-
-        Log.d(TAG, "Pre-filter: SMS passed financial pre-screening successfully.")
+        if (whitelistedSenders.none { SenderRules.matches(sender.lowercase().trim(), it.senderId) }) return false
+        if (SmsRules.blockedByPrivacy(body, privacyKeywords.map { it.keyword })) return false
+        if (SmsRules.isStatementNotice(body)) return false
         return true
     }
 
     /**
-     * Core processing logic: parsing, category matches, accounts mapping, EMI split & updates database
+     * Returns false when the message could not be looked at yet (not signed in, data not loaded)
+     * and should be tried again later; true once it has been dealt with one way or another.
      */
-    suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long): Boolean {
-        Log.d(TAG, "Processing SMS from $sender received at $timestamp (${body.length} chars)")
-        
+    suspend fun processSms(context: Context, sender: String, body: String, timestamp: Long): Boolean =
+        lock.withLock { process(context.applicationContext, sender, body, timestamp) }
+
+    private suspend fun process(context: Context, sender: String, body: String, timestamp: Long): Boolean {
         // Nothing can be read or saved before sign-in (Firestore rules). Leave the message in the
-        // inbox, without moving the "last processed" marker, so reconciliation picks it up later.
-        if (!FirebaseService.hasSignedInUser()) {
-            Log.w(TAG, "No signed-in user; deferring SMS processing.")
-            return false
-        }
+        // inbox, without moving the "last processed" marker, so the catch-up picks it up later.
+        if (!FirebaseService.hasSignedInUser()) return false
+        // Wait for real data: a freshly started background process starts with empty lists.
+        if (!FirebaseService.ensureCoreDataLoaded()) return false
 
-        // Make sure accounts and transactions come from Firestore (server or offline cache), not the
-        // still-empty in-memory lists of a freshly started background process.
-        // Signed in but no household yet (or data not reachable): defer, same as signed out.
-        if (!FirebaseService.ensureCoreDataLoaded()) {
-            Log.w(TAG, "Household data not loaded; deferring SMS processing.")
-            return false
-        }
-
-        // Pre-filter first: most SMS are not from a bank, and this needs only two small lists.
         val whitelisted = FirebaseService.getWhitelistedSenders().first()
         val privacyKeywords = FirebaseService.getPrivacyKeywords().first()
-        if (!preFilterSms(sender, body, whitelisted, privacyKeywords)) {
-            return true
-        }
+        if (!preFilterSms(sender, body, whitelisted, privacyKeywords)) return true
+        if (SmsLog.isHandled(context, sender, body)) return true
 
         val accounts = FirebaseService.getAccounts().first()
-        val historicalTransactions = FirebaseService.getTransactions().first()
+        val history = FirebaseService.getTransactions().first()
         val merchantRules = FirebaseService.getMerchantRules().first()
         val categories = FirebaseService.getCategories().first()
 
-        // 1. Entire SMS Exact Duplicate Check (Ignore the second one)
-        val isExactDuplicate = historicalTransactions.any {
-            it.originalSmsText?.trim() == body.trim()
-        }
-        if (isExactDuplicate) {
-            Log.d(TAG, "Duplicate Check: Exact duplicate SMS body already processed. Ignoring.")
-            return true
-        }
-
-        // Parse through Gemini (with local regex fallback)
-        val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return true
-        Log.d(TAG, "Parsed transaction: type=${parsed.transactionType}, category=${parsed.suggestedCategory}")
-        if (parsed.amount <= 0.0) {
-            Log.w(TAG, "No positive amount found in SMS; not creating a transaction.")
+        fun done(): Boolean {
+            SmsLog.markHandled(context, sender, body)
             updateLastProcessedTimestamp(context, timestamp)
             return true
         }
 
-        // 2. Map transaction to an Account using lastFourDigits match first, then dynamic Gemini matching
-        var targetAccount: Account? = null
-        
-        // Prioritize direct match in the SMS body using the account's last digits (supports multiple comma-separated digits e.g. Account # & Debit Card #)
-        if (accounts.isNotEmpty()) {
-            val matchedByDigits = accounts.find { acc ->
-                if (acc.lastFourDigits.isBlank()) false
-                else {
-                    val tokens = acc.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                    tokens.any { token -> body.contains(token) }
-                }
-            }
-            if (matchedByDigits != null) {
-                targetAccount = matchedByDigits
-                Log.d(TAG, "Account matched directly via lastFourDigits in SMS text: ${targetAccount.name}")
-            }
-        }
+        // Already saved (this phone's log was lost, or the partner's phone saw the same SMS).
+        if (history.any { SmsRules.sameSms(it.originalSmsText, body) }) return done()
 
-        // Fall back to Gemini's assigned account if no direct digit match was found in the raw body
-        if (targetAccount == null && !parsed.assignedAccount.isNullOrEmpty()) {
-            val cleanAssigned = parsed.assignedAccount.lowercase().trim()
-            targetAccount = accounts.find { acc ->
-                val tokens = acc.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                val fullLabel = "${acc.name} (xx${acc.lastFourDigits})".lowercase().trim()
-                cleanAssigned.contains(acc.name.lowercase().trim()) ||
-                cleanAssigned.contains(fullLabel) ||
-                acc.name.lowercase().trim().contains(cleanAssigned) ||
-                tokens.any { token -> cleanAssigned.contains(token) }
-            }
-            if (targetAccount != null) {
-                Log.d(TAG, "Account matched via Gemini assignedAccount: ${targetAccount.name}")
-            }
-        }
-        
-        if (targetAccount == null) {
-            Log.w(TAG, "Could not map transaction via direct lastFourDigits or Gemini matching. Finding or creating fallback account.")
-            val cleanBody = body.lowercase()
-            val cleanAssigned = (parsed.assignedAccount ?: "").lowercase()
-            val isCreditCard = cleanBody.contains("credit card") ||
-                    cleanBody.contains("card ending") ||
-                    cleanBody.contains("card no") ||
-                    cleanBody.contains(" cc ") ||
-                    cleanAssigned.contains("card") ||
-                    cleanAssigned.contains("credit")
-
-            targetAccount = if (isCreditCard) {
-                accounts.find { it.accountType == "LIABILITY" || it.type == AccountType.CREDIT_CARD }
-                    ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = true)
-            } else {
-                accounts.find { it.accountType == "ASSET" || it.type == AccountType.SAVINGS_ACCOUNT }
-                    ?: accounts.firstOrNull()
-                    ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
-            }
-        }
-
-        if (targetAccount == null) {
-            targetAccount = FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
-        }
-
-        // 3. SMS Filtering Barrier Check: Compare SMS timestamp against "As Of Date"
-        if (timestamp < targetAccount.asOfDate) {
-            Log.d(TAG, "Timeline Skip: SMS Timestamp ($timestamp) < Account '${targetAccount.name}' As Of Date (${targetAccount.asOfDate}). Skipped.")
-            updateLastProcessedTimestamp(context, timestamp)
-            return true
-        }
-
-        // 3ba. Historical Accounting Guardrail Check
-        val isAssetOrLiability = targetAccount.accountType == "ASSET" || targetAccount.accountType == "LIABILITY"
-        if (isAssetOrLiability) {
-            targetAccount.lastReconciledDate?.let { lastRec ->
-                if (timestamp < lastRec) {
-                    Log.d(TAG, "Accounting Guardrail Skip: SMS Timestamp ($timestamp) is within closed period < lastReconciledDate ($lastRec) on Account '${targetAccount.name}'. Skipped.")
-                    return true
-                }
-            }
-        }
-
-        // 3ba_transfer. Double SMS Opposite Transfer Deduplication and Merging Logic
+        val parsed = GeminiSmsParser.parseSms(body, merchantRules, categories, accounts) ?: return done()
+        if (parsed.amount <= 0.0) return done()
         val isCredit = parsed.transactionType == "CREDIT"
-        val ownAccountIds = accounts
-            .filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
-            .map { it.id }
-            .toSet()
-        val oppositeTransferTx = LedgerRules.findTransferCounterpart(
-            history = historicalTransactions.filter {
-                !(it.type == TransactionType.TRANSFER && it.accountId.isNotEmpty() && it.targetAccountId != null)
-            },
+
+        // --- Which account ---
+        val named = SmsRules.accountsNamed(body, accounts)
+        val payment = SmsRules.cardPayment(body, named)
+        var guessed = false
+        val targetAccount: Account = when {
+            // "Debited from a/c XX1234 towards card XX5678": the bank for a debit, the card for a credit.
+            payment != null -> if (isCredit) payment.second else payment.first
+            named.isNotEmpty() -> named.first()
+            else -> accountFromParser(parsed, accounts) ?: run {
+                guessed = true
+                guessAccount(body, parsed, accounts)
+            }
+        }
+
+        // Before the account's start date: its opening balance already includes this.
+        if (timestamp < targetAccount.asOfDate) return done()
+        // Inside a period already reconciled: the reconciled balance already includes this.
+        if (targetAccount.lastReconciledDate?.let { timestamp < it } == true) return done()
+
+        // --- Transfers between the family's own accounts ---
+        val ownAccountIds = accounts.map { it.id }.toSet()
+        val cardIds = accounts.filter { FreeToSpendRules.isCard(it) }.map { it.id }.toSet()
+        val mark = if (isCredit) CREDIT_MARK else DEBIT_MARK
+
+        // The other side's SMS already made this a transfer: add this SMS to it and stop.
+        LedgerRules.findRecordedTransfer(history, parsed.amount, timestamp, isCredit, targetAccount.id, cardIds) {
+            it.originalSmsText?.contains(mark) == true
+        }?.let { transfer ->
+            if (trySave { FirebaseService.updateTransaction(transfer.copy(originalSmsText = "${transfer.originalSmsText}\n$mark$body")) }) return done()
+        }
+
+        // The other side's SMS was saved as a plain expense or income: join the two into a transfer.
+        LedgerRules.findTransferCounterpart(
+            history = history.filter { it.type != TransactionType.TRANSFER },
             amount = parsed.amount,
             timestamp = timestamp,
             isCredit = isCredit,
             accountId = targetAccount.id,
             ownAccountIds = ownAccountIds,
-            smsBody = body
-        )
+            smsBody = body,
+            cardAccountIds = cardIds
+        )?.let { other ->
+            val otherAccount = accounts.find { it.id == other.accountId }
+            val from = if (isCredit) otherAccount else targetAccount
+            val to = if (isCredit) targetAccount else otherAccount
+            val label = "Transfer: ${from?.name ?: "Other account"} → ${to?.name ?: "Other account"}"
+            val otherText = other.originalSmsText ?: ""
+            val merged = other.copy(
+                type = TransactionType.TRANSFER,
+                category = "Transfer",
+                accountId = from?.id ?: other.accountId,
+                targetAccountId = to?.id ?: targetAccount.id,
+                narration = label,
+                payeeName = label,
+                originalSmsText = if (isCredit) "$DEBIT_MARK$otherText\n$CREDIT_MARK$body" else "$DEBIT_MARK$body\n$CREDIT_MARK$otherText",
+                status = TransactionStatus.CONFIRMED,
+                isProbablyDuplicate = false
+            )
+            if (trySave { FirebaseService.updateTransaction(merged) }) return done()
+        }
 
-        if (oppositeTransferTx != null) {
-            Log.d(TAG, "Transfer Deduplication: Found the opposite SMS for the same amount within the transfer window. Merging both SMS into a single TRANSFER transaction.")
-            try {
-                val oppositeAcc = accounts.find { it.id == oppositeTransferTx.accountId }
-                val oppositeAccName = oppositeAcc?.name ?: "Other Account"
-                
-                val mergedTx = if (isCredit) {
-                    // Current SMS is CREDIT to targetAccount. Opposite SMS was DEBIT from oppositeTransferTx.accountId.
-                    // This is a TRANSFER from oppositeTransferTx.accountId -> targetAccount.id
-                    oppositeTransferTx.copy(
+        // A bill payment that names both the bank account and the card: a transfer straight away.
+        if (payment != null) {
+            val (bank, card) = payment
+            if (card.lastReconciledDate?.let { timestamp < it } != true) {
+                val label = "Card payment: ${bank.name} → ${card.name}"
+                FirebaseService.addTransaction(
+                    Transaction(
+                        amount = parsed.amount,
                         type = TransactionType.TRANSFER,
                         category = "Transfer",
-                        targetAccountId = targetAccount.id,
-                        narration = "Transfer: $oppositeAccName → ${targetAccount.name}",
-                        payeeName = "Transfer: $oppositeAccName → ${targetAccount.name}",
-                        originalSmsText = "${oppositeTransferTx.originalSmsText ?: ""}\n[Credit SMS]: $body".trim(),
+                        timestamp = timestamp,
+                        date = timestamp,
+                        accountId = bank.id,
+                        targetAccountId = card.id,
+                        paidByUserId = payerOf(bank),
+                        narration = label,
+                        payeeName = label,
                         status = TransactionStatus.CONFIRMED,
-                        isProbablyDuplicate = false
+                        originalSmsText = mark + body
                     )
-                } else {
-                    // Current SMS is DEBIT from targetAccount. Opposite SMS was CREDIT to oppositeTransferTx.accountId.
-                    // This is a TRANSFER from targetAccount.id -> oppositeTransferTx.accountId
-                    oppositeTransferTx.copy(
-                        type = TransactionType.TRANSFER,
-                        category = "Transfer",
-                        accountId = targetAccount.id,
-                        targetAccountId = oppositeTransferTx.accountId,
-                        narration = "Transfer: ${targetAccount.name} → $oppositeAccName",
-                        payeeName = "Transfer: ${targetAccount.name} → $oppositeAccName",
-                        originalSmsText = "[Credit SMS]: ${oppositeTransferTx.originalSmsText ?: ""}\n[Debit SMS]: $body".trim(),
-                        status = TransactionStatus.CONFIRMED,
-                        isProbablyDuplicate = false
-                    )
-                }
-                
-                FirebaseService.updateTransaction(mergedTx)
-                Log.d(TAG, "Transfer Deduplication: Successfully merged debit & credit SMS into a single Transfer: ${mergedTx.id}")
-                updateLastProcessedTimestamp(context, timestamp)
-                return true
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to merge opposite transfer transactions, falling back to standard processing: ${e.message}", e)
+                )
+                return done()
             }
         }
 
-        // 3bb. Suspected Duplicate Check: same amount, same account, same calendar date
-        val matchingDuplicateTx = historicalTransactions.find {
-            Math.abs(it.amount - parsed.amount) < 0.01 &&
-            (it.accountId == targetAccount.id || it.targetAccountId == targetAccount.id) &&
-            isSameDay(it.timestamp, timestamp)
+        // --- Suspected duplicate: same amount, same account, same day (both get flagged) ---
+        val twin = history.find {
+            Math.abs(it.amount - parsed.amount) < 0.01 && !it.isIgnored &&
+                (it.accountId == targetAccount.id || it.targetAccountId == targetAccount.id) &&
+                isSameDay(it.timestamp, timestamp)
         }
-        val isProbablyDuplicate = matchingDuplicateTx != null
-        if (isProbablyDuplicate && matchingDuplicateTx != null) {
-            Log.d(TAG, "Duplicate Check: Found potential duplicate transaction on same day with same amount. Setting isProbablyDuplicate = true.")
-            // Tag the existing transaction as probably duplicate too, so BOTH get highlighted to the user
-            if (!matchingDuplicateTx.isProbablyDuplicate) {
-                try {
-                    FirebaseService.updateTransaction(matchingDuplicateTx.copy(isProbablyDuplicate = true))
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error updating existing transaction duplicate tag", e)
-                }
-            }
+        val isProbablyDuplicate = twin != null
+        // The earlier one keeps counting; flagging it only highlights the pair on screen.
+        if (twin != null && !twin.isProbablyDuplicate && twin.status == TransactionStatus.CONFIRMED) {
+            trySave { FirebaseService.updateTransaction(twin.copy(isProbablyDuplicate = true)) }
         }
 
-        // 4. Auto-Categorization Heuristics
-        // Check if any Smart Rule (merchant rule) keyword is found in SMS body or narration
-        var matchedRuleCategory: String? = null
-        for (rule in merchantRules) {
-            if (rule.keyword.isNotEmpty() && body.contains(rule.keyword, ignoreCase = true)) {
-                matchedRuleCategory = rule.assignedCategory
-                break
-            }
+        // --- Category ---
+        val rule = merchantRules.firstOrNull { it.keyword.isNotEmpty() && body.contains(it.keyword, ignoreCase = true) }
+        val vendorKnown = !SmsRules.isUnknownVendor(parsed.vendor)
+        val matchedHistory = if (!vendorKnown) null else history.firstOrNull {
+            val vendor = parsed.vendor.trim()
+            it.narration.replace("Spent at ", "").substringAfter(" - ").trim().equals(vendor, ignoreCase = true) ||
+                it.narration.replace("Spent at ", "").trim().equals(vendor, ignoreCase = true)
         }
-        val isSmartRuleMatched = matchedRuleCategory != null
-
-        val matchedHistory = historicalTransactions.firstOrNull { 
-            val cleanNarration = it.narration
-                .replace("Spent at ", "")
-                .substringAfter(" - ")
-                .trim()
-            cleanNarration.equals(parsed.vendor.trim(), ignoreCase = true) ||
-            it.narration.replace("Spent at ", "").trim().equals(parsed.vendor.trim(), ignoreCase = true)
-        }
-        
         var category = when {
-            matchedRuleCategory != null -> {
-                Log.d(TAG, "Heuristic: Matched smart merchant rule. Assigning category: $matchedRuleCategory")
-                matchedRuleCategory
-            }
-            matchedHistory != null && categories.any { it.name.equals(matchedHistory.category, ignoreCase = true) } -> {
-                Log.d(TAG, "Heuristic: Found vendor in history with valid COA category: ${matchedHistory.category}")
-                matchedHistory.category
-            }
-            else -> {
-                parsed.suggestedCategory
-            }
+            rule != null -> rule.assignedCategory
+            matchedHistory != null && categories.any { it.name.equals(matchedHistory.category, ignoreCase = true) } -> matchedHistory.category
+            else -> parsed.suggestedCategory
         }
+        val inChart = categories.find { it.name.equals(category, ignoreCase = true) }
+        if (inChart != null) category = inChart.name
+        else if (category.isBlank()) category = categories.find { it.name.equals("Others", ignoreCase = true) }?.name ?: "Unknown"
 
-        // Validate final category against COA categories
-        val matchedCoa = categories.find { it.name.equals(category, ignoreCase = true) }
-        if (matchedCoa != null) {
-            category = matchedCoa.name
-        } else if (category.trim().isEmpty()) {
-            category = categories.find { it.name.equals("Others", ignoreCase = true) }?.name ?: "Unknown"
-        }
+        val isUncertain = parsed.suggestedCategory.isBlank() ||
+            parsed.suggestedCategory.equals("Others", ignoreCase = true) || parsed.suggestedCategory.equals("Unknown", ignoreCase = true)
+        val isOldSms = timestamp < System.currentTimeMillis() - 10 * 60 * 1000
+        val foreign = SmsRules.foreignCurrencyOnly(body)
+        // Anything the app had to guess is held for review. Review items still count in balances.
+        val needsReview = guessed || parsed.fromBackup || foreign || isProbablyDuplicate ||
+            (rule == null && (isUncertain || matchedHistory == null || isOldSms))
+        val status = if (needsReview) TransactionStatus.PENDING_REVIEW else TransactionStatus.CONFIRMED
 
-        val isBrandNewVendor = matchedHistory == null
-        val isUncertain = parsed.suggestedCategory.equals("Others", ignoreCase = true) || parsed.suggestedCategory.isEmpty() || parsed.suggestedCategory.equals("Unknown", ignoreCase = true)
-        
-        // Old SMS (e.g. backbilled from around opening date) or transactions with any uncertainty should be held for confirmation.
-        val isOldSms = timestamp < (System.currentTimeMillis() - 10 * 60 * 1000)
-        val status = if ((isUncertain || isBrandNewVendor || isOldSms) && !isSmartRuleMatched) {
-            TransactionStatus.PENDING_REVIEW
-        } else {
-            TransactionStatus.CONFIRMED
-        }
-
-        // Check if this transaction represents a Loan EMI payment
-        val isLoanAccount = targetAccount.type == AccountType.LOAN
-        val containsEmiKeywords = body.lowercase().contains("emi") || body.lowercase().contains("loan installment") || body.lowercase().contains("installment")
-        
-        // An EMI debited from a bank account must name the loan (its digits or name), or say "loan"
-        // when there is only one loan. Card "converted to EMI" messages are not loan payments.
-        val lowerBody = body.lowercase()
-        val loanAccounts = accounts.filter { it.type == AccountType.LOAN }
-        val emiLoan = if (containsEmiKeywords && targetAccount.accountType == "ASSET" && !lowerBody.contains("converted")) {
-            loanAccounts.firstOrNull { loan ->
-                val tokens = loan.lastFourDigits.split(",", "/", ";", " ", "|").map { it.trim() }.filter { it.length >= 3 }
-                tokens.any { body.contains(it) } || (loan.name.length >= 3 && lowerBody.contains(loan.name.lowercase()))
-            } ?: loanAccounts.singleOrNull()?.takeIf { lowerBody.contains("loan") }
+        // --- A rule that points at an investment account: money moved there, not spent ---
+        val investment = if (rule != null && !isCredit && targetAccount.accountType == "ASSET") {
+            accounts.find {
+                it.id != targetAccount.id && it.accountType == "ASSET" && !FreeToSpendRules.isLiquid(it) &&
+                    it.name.equals(rule.assignedCategory, ignoreCase = true)
+            }
         } else null
-
-        if (isLoanAccount || emiLoan != null) {
-            // Find the loan account we are paying
-            val loanAcc = if (isLoanAccount) targetAccount else emiLoan
-            
-            if (loanAcc != null) {
-                // "Automated Interest Split: When an SMS matching an EMI payment is processed, the app must auto-calculate the split using the formula:
-                // Interest Component = (Current Outstanding Loan Balance * Annual Interest Rate) / 12
-                // Principal Component = Total EMI Paid - Interest Component"
-                val emiPaid = parsed.amount
-                val outstandingBalance = Math.abs(loanAcc.balance) // Holds negative balance, take absolute
-                val annualRate = loanAcc.annualInterestRate
-                
-                val interestComponent = (outstandingBalance * (annualRate / 100.0)) / 12.0
-                val principalComponent = (emiPaid - interestComponent).coerceAtLeast(0.0)
-                
-                Log.d(TAG, "EMI Split: EMI=$emiPaid, Outstanding=$outstandingBalance, Rate=$annualRate%, Interest=$interestComponent, Principal=$principalComponent")
-                
-                // Perform EMI splits Database Actions:
-                // Action 1: Reduce the outstanding Loan Account balance by the Principal Component.
-                // (The loan balance is computed from the ledger; the principal transfer reduces it.)
-
-                // The paying account: the one the SMS was matched to, unless that is the loan itself.
-                val sourceAcc = if (targetAccount.id != loanAcc.id && targetAccount.accountType == "ASSET") {
-                    targetAccount
-                } else {
-                    accounts.find { it.type == AccountType.SAVINGS_ACCOUNT }
-                        ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
-                }
-                val sourceId = sourceAcc.id
-                val payer = sourceAcc.ownerUserId.ifEmpty { "User 1" }
-                
-                // Action 2: Log the Principal Component as a "Transfer" from Savings to the Loan Account (hidden from Expense charts)
-                val transferTx = Transaction(
-                    id = UUID.randomUUID().toString(),
-                    amount = principalComponent,
+        if (investment != null && investment.lastReconciledDate?.let { timestamp < it } != true) {
+            val label = "Investment: ${targetAccount.name} → ${investment.name}"
+            FirebaseService.addTransaction(
+                Transaction(
+                    amount = parsed.amount,
                     type = TransactionType.TRANSFER,
                     category = "Transfer",
                     timestamp = timestamp,
-                    accountId = sourceId,
-                    targetAccountId = loanAcc.id,
-                    paidByUserId = payer,
-                    scope = TransactionScope.FAMILY,
-                    narration = "EMI Principal Auto-Transfer to ${loanAcc.name}",
+                    date = timestamp,
+                    accountId = targetAccount.id,
+                    targetAccountId = investment.id,
+                    paidByUserId = payerOf(targetAccount),
+                    narration = label,
+                    payeeName = label,
                     status = TransactionStatus.CONFIRMED,
-                    isLoanEmi = true,
-                    principalComponent = principalComponent,
-                    interestComponent = 0.0,
                     originalSmsText = body,
+                    isSmartRule = true,
                     isProbablyDuplicate = isProbablyDuplicate
                 )
-                FirebaseService.addTransaction(transferTx)
-                
-                // Action 3: Log the Interest Component as a "Finance: Loan Interest" Expense (visible on Expense charts)
-                val interestTx = Transaction(
-                    id = UUID.randomUUID().toString(),
-                    amount = interestComponent,
-                    type = TransactionType.EXPENSE,
-                    category = "Finance: Loan Interest",
-                    timestamp = timestamp,
-                    accountId = sourceId,
-                    paidByUserId = payer,
-                    scope = TransactionScope.FAMILY,
-                    narration = "EMI Interest Expense for ${loanAcc.name}",
-                    status = TransactionStatus.CONFIRMED,
-                    isLoanEmi = true,
-                    principalComponent = 0.0,
-                    interestComponent = interestComponent,
-                    originalSmsText = body,
-                    isProbablyDuplicate = isProbablyDuplicate
-                )
-                FirebaseService.addTransaction(interestTx)
-                
-            } else {
-                Log.w(TAG, "EMI keyword matched, but no LOAN account found to split EMI. Logging as standard Expense.")
-                logStandardTransaction(targetAccount, parsed, timestamp, isUncertain, category, status, body, isSmartRuleMatched, isProbablyDuplicate)
-            }
-        } else {
-            // Log as standard Transaction
-            logStandardTransaction(targetAccount, parsed, timestamp, isUncertain, category, status, body, isSmartRuleMatched, isProbablyDuplicate)
+            )
+            return done()
         }
 
-        // Save last processed SMS timestamp locally
-        updateLastProcessedTimestamp(context, timestamp)
-        return true
-    }
+        // --- Loan payments: interest is an expense, the rest pays down the loan ---
+        val lowerBody = body.lowercase()
+        val mentionsEmi = lowerBody.contains("emi") || lowerBody.contains("installment") || lowerBody.contains("instalment")
+        val loans = accounts.filter { it.type == AccountType.LOAN }
+        // An EMI debited from a bank account must name the loan (digits or name), or say "loan"
+        // when there is only one. Card "converted to EMI" messages are not loan payments.
+        val loan: Account? = when {
+            targetAccount.type == AccountType.LOAN -> targetAccount
+            mentionsEmi && !isCredit && targetAccount.accountType == "ASSET" && !lowerBody.contains("converted") ->
+                loans.firstOrNull { l ->
+                    SmsRules.digitTokens(l).any { SmsRules.namesDigits(body, it) } || (l.name.length >= 3 && lowerBody.contains(l.name.lowercase()))
+                } ?: loans.singleOrNull()?.takeIf { lowerBody.contains("loan") }
+            else -> null
+        }
+        if (loan != null && !isCredit && loan.lastReconciledDate?.let { timestamp < it } != true) {
+            val source = if (targetAccount.id != loan.id) targetAccount
+                else accounts.find { FreeToSpendRules.isLiquid(it) } ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
+            val (interest, principal) = LedgerRules.emiSplit(
+                amount = parsed.amount,
+                outstanding = Math.abs(loan.balance),
+                annualRate = loan.annualInterestRate,
+                interestAlreadyCharged = LedgerRules.loanPaidInMonth(loan.id, history, timestamp)
+            )
+            // The paying account was a guess when the SMS was matched to the loan itself.
+            val emiStatus = if (targetAccount.id == loan.id || guessed) TransactionStatus.PENDING_REVIEW else TransactionStatus.CONFIRMED
+            if (principal > 0.0) {
+                FirebaseService.addTransaction(
+                    Transaction(
+                        amount = principal,
+                        type = TransactionType.TRANSFER,
+                        category = "Transfer",
+                        timestamp = timestamp,
+                        date = timestamp,
+                        accountId = source.id,
+                        targetAccountId = loan.id,
+                        paidByUserId = payerOf(source),
+                        narration = "EMI principal to ${loan.name}",
+                        status = emiStatus,
+                        isLoanEmi = true,
+                        principalComponent = principal,
+                        originalSmsText = body,
+                        isProbablyDuplicate = isProbablyDuplicate
+                    )
+                )
+            }
+            if (interest > 0.0) {
+                FirebaseService.addTransaction(
+                    Transaction(
+                        amount = interest,
+                        type = TransactionType.EXPENSE,
+                        category = LedgerRules.LOAN_INTEREST_CATEGORY,
+                        timestamp = timestamp,
+                        date = timestamp,
+                        accountId = source.id,
+                        paidByUserId = payerOf(source),
+                        narration = "EMI interest for ${loan.name}",
+                        status = emiStatus,
+                        isLoanEmi = true,
+                        interestComponent = interest,
+                        originalSmsText = body,
+                        isProbablyDuplicate = isProbablyDuplicate
+                    )
+                )
+            }
+            return done()
+        }
 
-    private suspend fun logStandardTransaction(
-        account: Account,
-        parsed: ParsedTransactionResponse,
-        timestamp: Long,
-        isUncertain: Boolean,
-        category: String,
-        status: TransactionStatus,
-        body: String,
-        isSmartRule: Boolean,
-        isProbablyDuplicate: Boolean
-    ) {
-        val cleanType = if (parsed.transactionType == "CREDIT") TransactionType.INCOME else TransactionType.EXPENSE
-        val cleanVendor = parsed.vendor.replace("Spent at ", "").trim()
-        val finalNarration = if (cleanVendor.isNotBlank()) "$category - $cleanVendor" else category
-
-        val entryTypeStr = cleanType.name
-        val debitId = if (cleanType == TransactionType.INCOME) account.accountId else category
-        val creditId = if (cleanType == TransactionType.INCOME) category else account.accountId
-
-        val tx = Transaction(
-            transactionId = UUID.randomUUID().toString(),
-            id = UUID.randomUUID().toString(),
-            amount = parsed.amount,
-            type = cleanType,
-            category = category,
-            timestamp = timestamp,
-            date = timestamp,
-            accountId = account.accountId,
-            debitAccountId = debitId,
-            creditAccountId = creditId,
-            entryType = entryTypeStr,
-            payeeName = cleanVendor,
-            narration = finalNarration,
-            paidByUserId = if (account.ownerUserId.isNotEmpty()) account.ownerUserId else "User 1",
-            scope = TransactionScope.FAMILY,
-            status = status,
-            originalSmsText = body,
-            isSmartRule = isSmartRule,
-            isProbablyDuplicate = isProbablyDuplicate
+        // --- An ordinary expense or income ---
+        val type = if (isCredit) TransactionType.INCOME else TransactionType.EXPENSE
+        val vendor = if (vendorKnown) parsed.vendor.replace("Spent at ", "").trim() else ""
+        val note = if (foreign) "Check amount (foreign currency): " else ""
+        FirebaseService.addTransaction(
+            Transaction(
+                amount = parsed.amount,
+                type = type,
+                category = category,
+                timestamp = timestamp,
+                date = timestamp,
+                accountId = targetAccount.accountId,
+                entryType = type.name,
+                payeeName = vendor,
+                narration = note + if (vendor.isNotBlank()) "$category - $vendor" else category,
+                paidByUserId = payerOf(targetAccount),
+                scope = TransactionScope.FAMILY,
+                status = status,
+                originalSmsText = body,
+                isSmartRule = rule != null,
+                isProbablyDuplicate = isProbablyDuplicate
+            )
         )
-        FirebaseService.addTransaction(tx)
+        return done()
     }
 
-    /**
-     * SharedPreferences persistence for reconciliation
-     */
-    fun getLastProcessedTimestamp(context: Context): Long {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getLong(KEY_LAST_PROCESSED_TIMESTAMP, 0L)
+    private fun payerOf(account: Account): String = account.ownerUserId.ifBlank { FreeToSpendRules.SHARED }
+
+    /** A save that may be refused (a reconciled period); false when it was. */
+    private suspend fun trySave(save: suspend () -> Unit): Boolean = try {
+        save()
+        true
+    } catch (e: IllegalArgumentException) {
+        Log.w(TAG, "Not saved: ${e.message}")
+        false
     }
+
+    /** The account Gemini (or the backup reader) picked, matched back to a real account by name. */
+    private fun accountFromParser(parsed: ParsedTransactionResponse, accounts: List<Account>): Account? {
+        val assigned = parsed.assignedAccount?.lowercase()?.trim().orEmpty()
+        // The backup reader falls back to "the first account", which is a guess, not a match.
+        if (assigned.isEmpty() || parsed.fromBackup) return null
+        return accounts.find { acc ->
+            val name = acc.name.lowercase().trim()
+            name.isNotEmpty() && (assigned.contains(name) || name.contains(assigned) ||
+                SmsRules.digitTokens(acc).any { assigned.contains(it) })
+        }
+    }
+
+    /** No account could be matched: the first card or bank account, and the item goes to review. */
+    private suspend fun guessAccount(body: String, parsed: ParsedTransactionResponse, accounts: List<Account>): Account {
+        val lower = body.lowercase()
+        val assigned = (parsed.assignedAccount ?: "").lowercase()
+        val looksLikeCard = lower.contains("credit card") || lower.contains("card ending") || lower.contains("card no") ||
+            lower.contains(" cc ") || assigned.contains("card") || assigned.contains("credit")
+        return if (looksLikeCard) {
+            accounts.find { FreeToSpendRules.isCard(it) } ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = true)
+        } else {
+            accounts.find { FreeToSpendRules.isLiquid(it) } ?: FirebaseService.getOrCreateFallbackAccount(isCreditCard = false)
+        }
+    }
+
+    fun getLastProcessedTimestamp(context: Context): Long =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getLong(KEY_LAST_PROCESSED_TIMESTAMP, 0L)
 
     fun updateLastProcessedTimestamp(context: Context, timestamp: Long) {
-        val currentMax = getLastProcessedTimestamp(context)
-        if (timestamp > currentMax) {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putLong(KEY_LAST_PROCESSED_TIMESTAMP, timestamp).apply()
-            Log.d(TAG, "Successfully updated last_processed_sms_timestamp locally to: $timestamp")
-        }
-    }
-
-    private fun extractLast4Digits(text: String): String? {
-        // Search 4 consecutive digits matching cards or accounts
-        val cardRegex = Regex("""\b\d{4}\b""")
-        val matches = cardRegex.findAll(text).toList()
-        return if (matches.isNotEmpty()) {
-            // Often, it's the last 4 sequence, let's take the first or last depending on common templates
-            // Usually, the card/account numbers are the only 4 digit isolated sequences
-            matches.last().value
-        } else {
-            null
+        if (timestamp > getLastProcessedTimestamp(context)) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putLong(KEY_LAST_PROCESSED_TIMESTAMP, timestamp).apply()
         }
     }
 
@@ -511,6 +376,6 @@ object SmsProcessor {
         val cal1 = java.util.Calendar.getInstance().apply { timeInMillis = t1 }
         val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = t2 }
         return cal1.get(java.util.Calendar.YEAR) == cal2.get(java.util.Calendar.YEAR) &&
-               cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR)
+            cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR)
     }
 }

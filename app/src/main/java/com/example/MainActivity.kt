@@ -71,8 +71,11 @@ class MainActivity : ComponentActivity() {
                         com.example.reminders.ReminderWorker.schedule(applicationContext)
                     }
                 }
-                var selectedTab by remember { mutableStateOf<ScreenTab>(ScreenTab.Dashboard) }
-                var activeSubPage by remember { mutableStateOf<String?>(null) } // "categories", "rules" or "reserves"
+                // Kept by route name so the tab survives a screen rotation.
+                var selectedRoute by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(ScreenTab.Dashboard.route) }
+                val allTabs = listOf(ScreenTab.Dashboard, ScreenTab.Transactions, ScreenTab.Analytics, ScreenTab.Reminders, ScreenTab.Settings)
+                val selectedTab = allTabs.firstOrNull { it.route == selectedRoute } ?: ScreenTab.Dashboard
+                var activeSubPage by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) } // "categories", "rules" or "reserves"
 
                 if (authState == com.example.data.AuthState.NEEDS_HOUSEHOLD) {
                     HouseholdSetupScreen()
@@ -118,7 +121,7 @@ class MainActivity : ComponentActivity() {
                                     val selected = selectedTab == tab
                                     NavigationBarItem(
                                         selected = selected,
-                                        onClick = { selectedTab = tab },
+                                        onClick = { selectedRoute = tab.route },
                                         label = { Text(tab.title) },
                                         icon = {
                                             Icon(
@@ -147,7 +150,7 @@ class MainActivity : ComponentActivity() {
                                 ScreenTab.Dashboard -> {
                                     DashboardScreen(
                                         viewModel = viewModel,
-                                        onNavigateTransactions = { selectedTab = ScreenTab.Transactions },
+                                        onNavigateTransactions = { selectedRoute = ScreenTab.Transactions.route },
                                         onOpenReserves = { activeSubPage = "reserves" },
                                         onOpenNetWorth = { activeSubPage = "networth" },
                                         modifier = contentModifier
