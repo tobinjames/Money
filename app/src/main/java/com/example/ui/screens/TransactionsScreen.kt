@@ -1317,7 +1317,7 @@ fun TransactionsScreen(
                         item {
                             val currentAcc = accounts.find { it.id == selectedAccountId } ?: accounts.firstOrNull()
                             AccountPickerField(
-                                label = if (txType == TransactionType.TRANSFER) "Source Account" else "Payment Account",
+                                label = if (txType == TransactionType.TRANSFER) "From account" else if (txType == TransactionType.INCOME) "Received in" else "Paid from",
                                 selectedAccount = currentAcc,
                                 onClick = { showAddAccountPicker = true },
                                 modifier = Modifier.padding(vertical = 4.dp)
@@ -1329,10 +1329,10 @@ fun TransactionsScreen(
                             item {
                                 val currentTarget = accounts.find { it.id == selectedTargetAccountId }
                                 AccountPickerField(
-                                    label = "Destination Account",
+                                    label = "To account",
                                     selectedAccount = currentTarget,
                                     onClick = { showAddTargetAccountPicker = true },
-                                    placeholder = "Select destination...",
+                                    placeholder = "Choose account",
                                     modifier = Modifier.padding(vertical = 4.dp)
                                 )
                             }
@@ -1341,21 +1341,10 @@ fun TransactionsScreen(
                         // Searchable Category Picker (when not Transfer)
                         if (txType != TransactionType.TRANSFER) {
                             item {
-                                val targetClass = if (txType == TransactionType.INCOME) "INCOME" else "EXPENSE"
-                                val quickCats = remember(categories, txType) {
-                                    val filtered = categories.filter {
-                                        it.accountClass.equals(targetClass, ignoreCase = true) ||
-                                        it.accountType.equals(targetClass, ignoreCase = true) ||
-                                        (it.accountClass.isBlank() && it.accountType.isBlank())
-                                    }.map { it.name.trim() }.filter { it.isNotBlank() && !it.equals("Transfer", ignoreCase = true) }.distinct()
-
-                                    if (filtered.isNotEmpty()) filtered.take(6)
-                                    else if (txType == TransactionType.INCOME) listOf("Salary", "Investment Return", "Refund", "Gifts")
-                                    else listOf("Food & Dining", "Groceries", "Utilities", "Housing", "Shopping", "Travel")
-                                }
+                                val quickCats = remember(allTransactions, categories, txType) { topCategories(allTransactions, categories, txType) }
 
                                 CategoryPickerField(
-                                    label = "Transaction Category",
+                                    label = "Category",
                                     selectedCategory = selectedCategoryId,
                                     onClick = { showAddCategoryPicker = true },
                                     onQuickSelect = { selectedCategoryId = it },
@@ -1375,7 +1364,8 @@ fun TransactionsScreen(
                 accounts = accounts,
                 selectedAccountId = selectedAccountId,
                 onAccountSelected = { selectedAccountId = it.id },
-                title = if (txType == TransactionType.TRANSFER) "Select Source Account" else "Select Payment Account"
+                title = if (txType == TransactionType.TRANSFER) "Move money from" else if (txType == TransactionType.INCOME) "Received in" else "Paid from",
+                viewModel = viewModel
             )
 
             SearchableAccountPickerBottomSheet(
@@ -1385,7 +1375,8 @@ fun TransactionsScreen(
                 selectedAccountId = selectedTargetAccountId ?: "",
                 excludedAccountId = selectedAccountId,
                 onAccountSelected = { selectedTargetAccountId = it.id },
-                title = "Select Destination Account"
+                title = "Move money to",
+                viewModel = viewModel
             )
 
             SearchableCategoryPickerBottomSheet(
@@ -1394,7 +1385,9 @@ fun TransactionsScreen(
                 categories = categories,
                 selectedCategory = selectedCategoryId,
                 onCategorySelected = { selectedCategoryId = it },
-                transactionType = txType
+                transactionType = txType,
+                viewModel = viewModel,
+                suggestions = remember(allTransactions, categories, txType) { topCategories(allTransactions, categories, txType) }
             )
         }
 
@@ -1850,7 +1843,7 @@ fun TransactionsScreen(
                         item {
                             val currentAcc = accounts.find { it.id == editAccountId } ?: accounts.firstOrNull()
                             AccountPickerField(
-                                label = if (editTxType == TransactionType.TRANSFER) "Source Account" else "Payment Account",
+                                label = if (editTxType == TransactionType.TRANSFER) "From account" else if (editTxType == TransactionType.INCOME) "Received in" else "Paid from",
                                 selectedAccount = currentAcc,
                                 onClick = { showEditAccountPicker = true },
                                 enabled = !isTxLocked,
@@ -1863,11 +1856,11 @@ fun TransactionsScreen(
                             item {
                                 val currentTarget = accounts.find { it.id == editTargetAccountId }
                                 AccountPickerField(
-                                    label = "Destination Account",
+                                    label = "To account",
                                     selectedAccount = currentTarget,
                                     onClick = { showEditTargetAccountPicker = true },
                                     enabled = !isTxLocked,
-                                    placeholder = "Select destination...",
+                                    placeholder = "Choose account",
                                     modifier = Modifier.padding(vertical = 4.dp)
                                 )
                             }
@@ -1876,21 +1869,10 @@ fun TransactionsScreen(
                         // Searchable Category Picker (when not Transfer)
                         if (editTxType != TransactionType.TRANSFER) {
                             item {
-                                val targetClass = if (editTxType == TransactionType.INCOME) "INCOME" else "EXPENSE"
-                                val quickCats = remember(categories, editTxType) {
-                                    val filtered = categories.filter {
-                                        it.accountClass.equals(targetClass, ignoreCase = true) ||
-                                        it.accountType.equals(targetClass, ignoreCase = true) ||
-                                        (it.accountClass.isBlank() && it.accountType.isBlank())
-                                    }.map { it.name.trim() }.filter { it.isNotBlank() && !it.equals("Transfer", ignoreCase = true) }.distinct()
-
-                                    if (filtered.isNotEmpty()) filtered.take(6)
-                                    else if (editTxType == TransactionType.INCOME) listOf("Salary", "Investment Return", "Refund", "Gifts")
-                                    else listOf("Food & Dining", "Groceries", "Utilities", "Housing", "Shopping", "Travel")
-                                }
+                                val quickCats = remember(allTransactions, categories, editTxType) { topCategories(allTransactions, categories, editTxType) }
 
                                 CategoryPickerField(
-                                    label = "Transaction Category",
+                                    label = "Category",
                                     selectedCategory = editCategoryId,
                                     onClick = { showEditCategoryPicker = true },
                                     onQuickSelect = { editCategoryId = it },
@@ -2008,7 +1990,8 @@ fun TransactionsScreen(
                 accounts = accounts,
                 selectedAccountId = editAccountId,
                 onAccountSelected = { editAccountId = it.id },
-                title = if (editTxType == TransactionType.TRANSFER) "Select Source Account" else "Select Payment Account"
+                title = if (editTxType == TransactionType.TRANSFER) "Move money from" else if (editTxType == TransactionType.INCOME) "Received in" else "Paid from",
+                viewModel = viewModel
             )
 
             SearchableAccountPickerBottomSheet(
@@ -2018,7 +2001,8 @@ fun TransactionsScreen(
                 selectedAccountId = editTargetAccountId ?: "",
                 excludedAccountId = editAccountId,
                 onAccountSelected = { editTargetAccountId = it.id },
-                title = "Select Destination Account"
+                title = "Move money to",
+                viewModel = viewModel
             )
 
             SearchableCategoryPickerBottomSheet(
@@ -2027,7 +2011,9 @@ fun TransactionsScreen(
                 categories = categories,
                 selectedCategory = editCategoryId,
                 onCategorySelected = { editCategoryId = it },
-                transactionType = editTxType
+                transactionType = editTxType,
+                viewModel = viewModel,
+                suggestions = remember(allTransactions, categories, editTxType) { topCategories(allTransactions, categories, editTxType) }
             )
         }
     }

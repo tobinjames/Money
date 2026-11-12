@@ -25,17 +25,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # The real google-services.json is not in the repo. Use the one stored as a
-      # repository secret (GOOGLE_SERVICES_JSON) if there is one, otherwise a placeholder
-      # that is enough to compile (that APK can't sign in).
-      - name: Firebase config
-        env:
-          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+      # The real google-services.json is not in the repo. The code is first compiled and
+      # tested with a placeholder, so a problem with the Firebase file can never hide a
+      # problem in the code (or the other way round).
+      - name: Placeholder Firebase config
         run: |
-          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
-            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
-          else
-            cat > app/google-services.json <<'JSON'
+          cat > app/google-services.json <<'JSON'
           {
             "project_info": { "project_number": "000000000000", "project_id": "ci-placeholder", "storage_bucket": "ci-placeholder.appspot.com" },
             "client": [{
@@ -50,6 +45,25 @@ jobs:
             "configuration_version": "1"
           }
           JSON
+
+      - name: Compile and unit test
+        run: ./gradlew --stacktrace compileDebugKotlin testDebugUnitTest
+
+      # Now the real file, from the GOOGLE_SERVICES_JSON repository secret, if there is one
+      # (without it the APK is built with the placeholder and can't sign in). The file must
+      # be for the Android app registered in Firebase with package name com.nestwise.app.
+      - name: Real Firebase config
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "::warning::No GOOGLE_SERVICES_JSON secret: this APK is built with a placeholder and can't sign in."
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+          if ! python3 -c "import json,sys; d=json.load(open('app/google-services.json')); sys.exit(0 if any(c['client_info']['android_client_info']['package_name']=='com.nestwise.app' for c in d['client']) else 1)"; then
+            echo "::error::The GOOGLE_SERVICES_JSON secret is not for this app. In Firebase > Project settings > Your apps, add an Android app with package name com.nestwise.app, download its google-services.json and save its whole contents as the secret. See docs/BUILD_AND_INSTALL.md."
+            exit 1
           fi
 
       # The signing key is not in the repo either. Google sign-in only works when the APK is
@@ -68,8 +82,8 @@ jobs:
               -keyalg RSA -keysize 2048 -validity 10000
           fi
 
-      - name: Compile and unit test
-        run: ./gradlew --stacktrace assembleDebug testDebugUnitTest
+      - name: Build the debug APK
+        run: ./gradlew --stacktrace assembleDebug
 
       - name: Keep the debug APK
         if: success()
