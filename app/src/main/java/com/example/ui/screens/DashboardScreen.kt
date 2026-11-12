@@ -847,6 +847,9 @@ fun DashboardScreen(
             clean.ifBlank { "MERCHANT" }
         }
         var createSmartRule by remember(editingTx.id) { mutableStateOf(false) }
+        var showEditAccountPicker by remember(editingTx.id) { mutableStateOf(false) }
+        var showEditTargetAccountPicker by remember(editingTx.id) { mutableStateOf(false) }
+        var showEditCategoryPicker by remember(editingTx.id) { mutableStateOf(false) }
         var ruleKeyword by remember(editingTx.id) { mutableStateOf(defaultKeyword) }
         var applyToHistory by remember(editingTx.id) { mutableStateOf(true) }
 
@@ -1241,171 +1244,43 @@ fun DashboardScreen(
                     }
 
                     item {
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            Text("Source Account", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            var expanded by remember { mutableStateOf(false) }
-                            val currentAcc = accountsState.find { it.id == editAccountId } ?: accountsState.firstOrNull()
-                            val boxLabel = currentAcc?.name ?: "Select account"
-                            
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(44.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
-                                    .clickable(enabled = !isTxLocked) { expanded = true }
-                                    .padding(horizontal = 12.dp),
-                                contentAlignment = Alignment.CenterStart
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(boxLabel, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                                }
-                                DropdownMenu(
-                                    expanded = expanded,
-                                    onDismissRequest = { expanded = false }
-                                ) {
-                                    accountsState.forEach { acc ->
-                                        DropdownMenuItem(
-                                            text = { Text(acc.name, fontSize = 13.sp) },
-                                            onClick = {
-                                                editAccountId = acc.id
-                                                expanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                        val currentAcc = accountsState.find { it.id == editAccountId } ?: accountsState.firstOrNull()
+                        AccountPickerField(
+                            label = if (editTxType == TransactionType.TRANSFER) "From account" else if (editTxType == TransactionType.INCOME) "Received in" else "Paid from",
+                            selectedAccount = currentAcc,
+                            onClick = { showEditAccountPicker = true },
+                            enabled = !isTxLocked,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
                     }
 
                     if (editTxType == TransactionType.TRANSFER) {
                         item {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                Text("Destination Account (Transfer To)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
-                                Spacer(modifier = Modifier.height(2.dp))
-                                var destExpanded by remember { mutableStateOf(false) }
-                                val currentDestAcc = accountsState.find { it.id == editTargetAccountId } ?: accountsState.firstOrNull { it.id != editAccountId }
-                                val destBoxLabel = currentDestAcc?.name ?: "Select destination account"
-                                
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(44.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                                        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
-                                        .clickable(enabled = !isTxLocked) { destExpanded = true }
-                                        .padding(horizontal = 12.dp),
-                                    contentAlignment = Alignment.CenterStart
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(destBoxLabel, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                                    }
-                                    DropdownMenu(
-                                        expanded = destExpanded,
-                                        onDismissRequest = { destExpanded = false }
-                                    ) {
-                                        accountsState.filter { it.id != editAccountId }.forEach { acc ->
-                                            DropdownMenuItem(
-                                                text = { Text(acc.name, fontSize = 13.sp) },
-                                                onClick = {
-                                                    editTargetAccountId = acc.id
-                                                    destExpanded = false
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
+                            val currentDestAcc = accountsState.find { it.id == editTargetAccountId } ?: accountsState.firstOrNull { it.id != editAccountId }
+                            AccountPickerField(
+                                label = "To account",
+                                selectedAccount = currentDestAcc,
+                                onClick = { showEditTargetAccountPicker = true },
+                                enabled = !isTxLocked,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
                         }
                     }
 
                     if (editTxType != TransactionType.TRANSFER) {
                         item {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                Text("Select Category", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                val targetClass = if (editTxType == TransactionType.INCOME) "INCOME" else "EXPENSE"
-                                val availableCats = remember(categoriesState, editTxType) {
-                                    if (categoriesState.isNotEmpty()) {
-                                        val filtered = categoriesState
-                                            .filter {
-                                                it.accountClass.equals(targetClass, ignoreCase = true) ||
-                                                it.accountType.equals(targetClass, ignoreCase = true) ||
-                                                (it.accountClass.isBlank() && it.accountType.isBlank())
-                                            }
-                                            .map { it.name.trim() }
-                                            .filter { it.isNotBlank() && !it.equals("Transfer", ignoreCase = true) }
-                                            .distinct()
-                                        if (filtered.isNotEmpty()) filtered
-                                        else categoriesState.map { it.name.trim() }.filter { it.isNotBlank() && !it.equals("Transfer", ignoreCase = true) }.distinct()
-                                    } else {
-                                        if (editTxType == TransactionType.INCOME) {
-                                            listOf("Salary", "Investment Return", "Refund", "Gifts", "Others")
-                                        } else {
-                                            CategoryColors.keys.filter { it != "Transfer" }
-                                        }
-                                    }
-                                }
-
-                                availableCats.chunked(3).forEach { chunk ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        chunk.forEach { cat ->
-                                            val isSelected = editCategoryId == cat
-                                            Box(
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .height(32.dp)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .background(
-                                                        if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                                    )
-                                                    .border(
-                                                        width = 1.dp,
-                                                        color = if (isSelected) MaterialTheme.colorScheme.primary
-                                                                else Color.Transparent,
-                                                        shape = RoundedCornerShape(8.dp)
-                                                    )
-                                                    .clickable(enabled = !isTxLocked) { editCategoryId = cat },
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Text(
-                                                    text = cat,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.padding(horizontal = 4.dp)
-                                                )
-                                            }
-                                        }
-                                        // fill empty slots in row
-                                        if (chunk.size < 3) {
-                                            repeat(3 - chunk.size) {
-                                                Spacer(modifier = Modifier.weight(1f))
-                                            }
-                                        }
-                                    }
-                                }
+                            val quickCats = remember(allTransactionsState, categoriesState, editTxType) {
+                                topCategories(allTransactionsState, categoriesState, editTxType)
                             }
+                            CategoryPickerField(
+                                label = "Category",
+                                selectedCategory = editCategoryId,
+                                onClick = { showEditCategoryPicker = true },
+                                onQuickSelect = { editCategoryId = it },
+                                quickSuggestions = quickCats,
+                                enabled = !isTxLocked,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
                         }
 
                         if (editTxType != TransactionType.TRANSFER) {
@@ -1507,6 +1382,38 @@ fun DashboardScreen(
                     }
                 }
             }
+        )
+
+        SearchableAccountPickerBottomSheet(
+            visible = showEditAccountPicker,
+            onDismiss = { showEditAccountPicker = false },
+            accounts = accountsState,
+            selectedAccountId = editAccountId,
+            onAccountSelected = { editAccountId = it.id },
+            title = if (editTxType == TransactionType.TRANSFER) "Move money from" else if (editTxType == TransactionType.INCOME) "Received in" else "Paid from",
+            viewModel = viewModel
+        )
+
+        SearchableAccountPickerBottomSheet(
+            visible = showEditTargetAccountPicker,
+            onDismiss = { showEditTargetAccountPicker = false },
+            accounts = accountsState,
+            selectedAccountId = editTargetAccountId ?: "",
+            excludedAccountId = editAccountId,
+            onAccountSelected = { editTargetAccountId = it.id },
+            title = "Move money to",
+            viewModel = viewModel
+        )
+
+        SearchableCategoryPickerBottomSheet(
+            visible = showEditCategoryPicker,
+            onDismiss = { showEditCategoryPicker = false },
+            categories = categoriesState,
+            selectedCategory = editCategoryId,
+            onCategorySelected = { editCategoryId = it },
+            transactionType = editTxType,
+            viewModel = viewModel,
+            suggestions = remember(allTransactionsState, categoriesState, editTxType) { topCategories(allTransactionsState, categoriesState, editTxType) }
         )
     }
 }
