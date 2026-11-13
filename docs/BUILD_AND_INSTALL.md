@@ -41,8 +41,10 @@ be signed with the same key.
    location near you (e.g. `asia-south1`; it can't be changed later).
 6. **AI Logic** > **Get started** > **Gemini Developer API**. This lets the app read SMS
    with Gemini without any API key in the APK.
-7. **App Check** > **Apps** > register the Android app (any provider screen can be skipped;
-   the app uses debug tokens, see step 6 below). AI Logic needs App Check.
+7. *(Optional, can be done later.)* **App Check** > **Apps** > register the Android app (any
+   provider screen can be skipped; the app uses debug tokens, see step 6 below). Gemini and
+   Firestore work without App Check as long as **App Check > APIs** shows them as
+   *Unenforced* (the default). Only click **Enforce** after every phone's token is added.
 8. Back in **Project settings** > **Your apps**, click **google-services.json** to download
    it. It must contain an `oauth_client` entry with `"client_type": 3`.
 
@@ -79,14 +81,16 @@ On GitHub, open the repo > **Settings** > **Secrets and variables** > **Actions*
 3. Copy the APK to each phone and open it. Android asks you to allow installs from that app
    (Files or Drive) the first time.
 
-## 6. First launch: App Check debug token
+## 6. First launch: App Check debug token (optional)
 
 The app uses App Check's debug provider (it isn't on the Play Store). On first launch each
 phone makes a debug token. Open **Settings > Health > App Check token (this phone)** and tap
 **Get** / **Copy** (or, with a computer, run `adb logcat | grep DebugAppCheckProvider`), then add the token in Firebase console >
 **App Check** > Apps > the Android app > **Manage debug tokens**. Do this once per phone
-(and again if you clear the app's data). Until a phone's token is added, Gemini can't be
-reached from it and SMS are read by the simpler on-phone reader instead.
+(and again if you clear the app's data). This only matters once App Check is set to
+**Enforce** for Firebase AI Logic or Firestore: while they are Unenforced, phones without a
+registered token still reach Gemini. After enforcing, a phone whose token isn't added can't
+reach Gemini, and SMS are read by the simpler on-phone reader instead.
 
 The build log's **Debug keystore** step prints the key's SHA-1 and SHA-256; if sign-in
 fails with error 10, compare them with the fingerprints registered in Firebase.
