@@ -1038,7 +1038,7 @@ private fun GeminiHealthRow() {
 }
 
 /**
- * This phone's App Check debug token, with a Copy button. Gemini only answers phones whose token
+ * This phone's App Check debug token, with a Copy button. Once App Check is enforced, Gemini only answers phones whose token
  * is added in Firebase console > App Check > Apps > Manage debug tokens (no adb needed).
  */
 @Composable
@@ -1054,7 +1054,7 @@ private fun AppCheckTokenRow() {
             Text("App Check token (this phone)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
             Text(
                 (token ?: "Not made yet. Tap Get.") +
-                    "\nAdd it in Firebase > App Check > Apps > Manage debug tokens, or Gemini won't answer.",
+                    "\nOnly needed if App Check is enforced: add it in Firebase > App Check > Apps > Manage debug tokens.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
