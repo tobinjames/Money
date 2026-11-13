@@ -30,7 +30,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.BuildConfig
 import com.example.data.AuthState
 import com.example.data.FirebaseService
 import com.example.ui.viewmodel.ExpenseViewModel
@@ -267,13 +266,12 @@ fun AuthScreen(
                                     onClick = {
                                         authErrorMessage = null
                                         try {
-                                            // google-services.json generates default_web_client_id once Google sign-in is enabled
-                                            // in Firebase; GOOGLE_WEB_CLIENT_ID in .env is only an override.
-                                            val generatedId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-                                                .takeIf { it != 0 }?.let { context.getString(it) }
-                                            val webClientId = BuildConfig.GOOGLE_WEB_CLIENT_ID
-                                                .takeIf { it.isNotBlank() && it != "YOUR_WEB_CLIENT_ID" } ?: generatedId ?: ""
-                                            if (webClientId.isBlank() || webClientId == "YOUR_WEB_CLIENT_ID") {
+                                            // The web client ID comes only from google-services.json: the google-services
+                                            // plugin generates default_web_client_id once Google sign-in is enabled in
+                                            // Firebase. Nothing about the project is written in code or in .env.
+                                            val webClientId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+                                                .takeIf { it != 0 }?.let { context.getString(it) } ?: ""
+                                            if (webClientId.isBlank()) {
                                                 authErrorMessage = "Google Sign-In is not configured: enable Google in Firebase Authentication, then download google-services.json into app/ again."
                                                 return@Button
                                             }
@@ -310,7 +308,7 @@ fun AuthScreen(
                 
                 // Footer details
                 Text(
-                    text = "Nestwise Dev Environment v2.10",
+                    text = "Family Expense Tracker",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                     textAlign = TextAlign.Center
