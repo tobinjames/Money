@@ -23,19 +23,30 @@ base64 -w0 money-debug.keystore > money-debug.keystore.b64
 
 Keep `money-debug.keystore` somewhere safe. Don't commit it.
 
-## 2. Firebase: register the app and download `google-services.json`
+If you already have the fixed key, skip the first command and reuse it: every build must
+be signed with the same key.
 
-1. Open [Firebase console](https://console.firebase.google.com) and choose your project.
-2. Gear icon > **Project settings** > **General** > **Your apps**.
-3. If there is no Android app yet, click **Add app** > Android, with package name
-   **`com.nestwise.app`**.
-4. In that app's card, click **Add fingerprint** and paste the **SHA-1** from step 1
-   (add the SHA-256 too).
-5. Make sure **Authentication > Sign-in method > Google** is enabled. Do this *before*
-   downloading the file, so the file includes the sign-in client ID.
-6. Click **google-services.json** to download it.
+## 2. Firebase: create the project and register the app
 
-## 3. Firebase: the family list (who may use the app)
+1. Open [Firebase console](https://console.firebase.google.com) > **Create a project** (or
+   choose yours). Google Analytics is not needed.
+2. **Authentication** > **Get started** > **Sign-in method** > **Google** > **Enable**,
+   choose a support email, **Save**. Leave every other provider off. Do this *before*
+   downloading the config file, so the file includes the sign-in client ID.
+3. Gear icon > **Project settings** > **General** > **Your apps** > **Add app** > Android,
+   with package name **`com.moneymanagement`** (it can't be changed later).
+4. In that app's card, click **Add fingerprint** and paste the **SHA-1** from step 1, then
+   again for the **SHA-256**.
+5. **Firestore Database** > **Create database** > Standard edition, production mode, a
+   location near you (e.g. `asia-south1`; it can't be changed later).
+6. **AI Logic** > **Get started** > **Gemini Developer API**. This lets the app read SMS
+   with Gemini without any API key in the APK.
+7. **App Check** > **Apps** > register the Android app (any provider screen can be skipped;
+   the app uses debug tokens, see step 6 below). AI Logic needs App Check.
+8. Back in **Project settings** > **Your apps**, click **google-services.json** to download
+   it. It must contain an `oauth_client` entry with `"client_type": 3`.
+
+## 3. Firebase: the family list and the rules
 
 Only Google accounts on this list can create or join a household, so nobody else can use
 your Firebase project even if they get the app. It lives in Firebase, not in this (public)
@@ -45,8 +56,7 @@ code.
 2. Collection ID: `config`. Document ID: `access`.
 3. Add a field `emails` of type **array**, with one **string** per person, in lower case,
    e.g. `you@gmail.com` and `partner@gmail.com`.
-4. Save. Deploy the latest `firestore.rules` too (Firestore > **Rules**: paste the file and
-   **Publish**).
+4. Save. Then Firestore > **Rules**: paste the whole of `firestore.rules` and **Publish**.
 
 To let someone else in later, add their email to the array. The app can't read or change
 this list.
@@ -75,7 +85,11 @@ The app uses App Check's debug provider (it isn't on the Play Store). On first l
 phone logs a debug token: connect the phone to a computer and run
 `adb logcat | grep DebugAppCheckProvider`, then add the token in Firebase console >
 **App Check** > Apps > the Android app > **Manage debug tokens**. Do this once per phone
-(and again if you clear the app's data).
+(and again if you clear the app's data). Until a phone's token is added, Gemini can't be
+reached from it and SMS are read by the simpler on-phone reader instead.
+
+The build log's **Debug keystore** step prints the key's SHA-1 and SHA-256; if sign-in
+fails with error 10, compare them with the fingerprints registered in Firebase.
 
 ## Building on your own computer instead
 
