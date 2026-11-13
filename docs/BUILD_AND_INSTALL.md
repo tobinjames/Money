@@ -82,8 +82,8 @@ On GitHub, open the repo > **Settings** > **Secrets and variables** > **Actions*
 ## 6. First launch: App Check debug token
 
 The app uses App Check's debug provider (it isn't on the Play Store). On first launch each
-phone logs a debug token: connect the phone to a computer and run
-`adb logcat | grep DebugAppCheckProvider`, then add the token in Firebase console >
+phone makes a debug token. Open **Settings > Health > App Check token (this phone)** and tap
+**Get** / **Copy** (or, with a computer, run `adb logcat | grep DebugAppCheckProvider`), then add the token in Firebase console >
 **App Check** > Apps > the Android app > **Manage debug tokens**. Do this once per phone
 (and again if you clear the app's data). Until a phone's token is added, Gemini can't be
 reached from it and SMS are read by the simpler on-phone reader instead.
