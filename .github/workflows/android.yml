@@ -77,7 +77,7 @@ jobs:
           if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
             printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
             # Shown so you can compare it with the SHA-1 registered in Firebase.
-            keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E 'SHA-?1|SHA-?256'
+            keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E 'SHA-?1|SHA-?256' || true
           else
             keytool -genkeypair -keystore debug.keystore -storepass android -keypass android \
               -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
