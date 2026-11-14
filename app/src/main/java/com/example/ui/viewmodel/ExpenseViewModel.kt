@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.domain.LedgerRules
+import com.example.domain.PayerRules
 import com.example.data.*
 import com.example.sms.SmsProcessor
 import com.example.ai.GeminiSmsParser
@@ -94,97 +95,39 @@ class ExpenseViewModel : ViewModel() {
     val scopeFilter: StateFlow<TransactionScope?> = _scopeFilter.asStateFlow()
 
     // Combined calculations (Stateflows derived from raw data and views filters)
-    val filteredAccounts = combine(accounts, currentFilter, currentUserUid, spouseUserUid) { list, filter, myUid, herUid ->
-        val user1Uid = myUid
-        val user2Uid = herUid
-        val user1Name = currentUserFirstName.value
-        val user2Name = spouseUserFirstName.value
-        
-        fun isUser1Strict(id: String?): Boolean {
-            if (id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)) return false
-            return (user1Uid != null && id == user1Uid) || id == "User 1" || (!user1Name.isNullOrBlank() && id.equals(user1Name, ignoreCase = true))
-        }
-        
-        fun isUser2Strict(id: String?): Boolean {
-            if (id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)) return false
-            return (user2Uid != null && id == user2Uid) || id == "User 2" || (!user2Name.isNullOrBlank() && id.equals(user2Name, ignoreCase = true))
-        }
+    private val householdUids = combine(currentUserUid, spouseUserUid) { mine, partners -> mine to partners }
 
-        fun isSharedStrict(id: String?): Boolean {
-            return id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)
-        }
+    /** The dashboard tab as a person: me, my partner, or the joint accounts. */
+    private fun viewOf(filter: ViewFilter) = when (filter) {
+        ViewFilter.User1 -> PayerRules.Who.ME
+        ViewFilter.User2 -> PayerRules.Who.PARTNER
+        ViewFilter.Combined -> PayerRules.Who.JOINT
+    }
 
+    /**
+     * The owner id the dashboard's selected tab stands for: my uid, my partner's, or "SHARED".
+     * Null when that person isn't known (no partner has joined yet).
+     */
+    val viewOwnerId: StateFlow<String?> = combine(currentFilter, householdUids) { filter, (myUid, partnerUid) ->
         when (filter) {
-            ViewFilter.Combined -> list.filter { isSharedStrict(it.ownerUserId) }
-            ViewFilter.User1 -> list.filter { isUser1Strict(it.ownerUserId) }
-            ViewFilter.User2 -> list.filter { isUser2Strict(it.ownerUserId) }
+            ViewFilter.User1 -> myUid
+            ViewFilter.User2 -> partnerUid
+            ViewFilter.Combined -> com.example.domain.FreeToSpendRules.SHARED
         }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    // Combined calculations (Stateflows derived from raw data and views filters)
+    val filteredAccounts = combine(accounts, currentFilter, householdUids) { list, filter, (myUid, partnerUid) ->
+        val view = viewOf(filter)
+        list.filter { PayerRules.whoIs(it.ownerUserId, myUid, partnerUid) == view }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val filteredTransactions = combine(transactions, accounts, currentFilter, scopeFilter, currentUserUid) { txList, accList, ownerFilter, scope, myUid ->
-        val user1Uid = myUid
-        val user2Uid = spouseUserUid.value
-        val user1Name = currentUserFirstName.value
-        val user2Name = spouseUserFirstName.value
-        
-        fun isUser1Strict(id: String?): Boolean {
-            if (id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("BOTH", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)) return false
-            return (user1Uid != null && id == user1Uid) || id == "User 1" || (!user1Name.isNullOrBlank() && id.equals(user1Name, ignoreCase = true))
-        }
-        
-        fun isUser2Strict(id: String?): Boolean {
-            if (id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("BOTH", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)) return false
-            return (user2Uid != null && id == user2Uid) || id == "User 2" || (!user2Name.isNullOrBlank() && id.equals(user2Name, ignoreCase = true))
-        }
-
-        fun isSharedStrict(id: String?): Boolean {
-            return id.isNullOrBlank() || id.equals("SHARED", ignoreCase = true) || id.equals("BOTH", ignoreCase = true) || id.equals("USER_UNKNOWN", ignoreCase = true)
-        }
-
-        fun txBelongsToUser1(tx: Transaction): Boolean {
-            val srcAcc = accList.find { it.id == tx.accountId }
-            val dstAcc = if (!tx.targetAccountId.isNullOrBlank()) accList.find { it.id == tx.targetAccountId } else null
-            
-            val accIsUser1 = srcAcc != null && isUser1Strict(srcAcc.ownerUserId)
-            val dstIsUser1 = dstAcc != null && isUser1Strict(dstAcc.ownerUserId)
-            val ownerIsUser1 = isUser1Strict(tx.ownerUserId) || (tx.ownerFirstName.isNotBlank() && user1Name != null && tx.ownerFirstName.equals(user1Name, ignoreCase = true))
-            val paidByIsUser1 = isUser1Strict(tx.paidByUserId)
-            
-            return accIsUser1 || dstIsUser1 || ownerIsUser1 || paidByIsUser1
-        }
-
-        fun txBelongsToUser2(tx: Transaction): Boolean {
-            val srcAcc = accList.find { it.id == tx.accountId }
-            val dstAcc = if (!tx.targetAccountId.isNullOrBlank()) accList.find { it.id == tx.targetAccountId } else null
-            
-            val accIsUser2 = srcAcc != null && isUser2Strict(srcAcc.ownerUserId)
-            val dstIsUser2 = dstAcc != null && isUser2Strict(dstAcc.ownerUserId)
-            val ownerIsUser2 = isUser2Strict(tx.ownerUserId) || (tx.ownerFirstName.isNotBlank() && user2Name != null && tx.ownerFirstName.equals(user2Name, ignoreCase = true))
-            val paidByIsUser2 = isUser2Strict(tx.paidByUserId)
-            
-            return accIsUser2 || dstIsUser2 || ownerIsUser2 || paidByIsUser2
-        }
-
-        fun txBelongsToShared(tx: Transaction): Boolean {
-            val srcAcc = accList.find { it.id == tx.accountId }
-            val dstAcc = if (!tx.targetAccountId.isNullOrBlank()) accList.find { it.id == tx.targetAccountId } else null
-            
-            val srcIsShared = srcAcc != null && isSharedStrict(srcAcc.ownerUserId)
-            val dstIsShared = dstAcc != null && isSharedStrict(dstAcc.ownerUserId)
-            val isExplicitlyShared = tx.paidByUserId.equals("BOTH", ignoreCase = true) || tx.paidByUserId.equals("SHARED", ignoreCase = true) || tx.ownerUserId.equals("SHARED", ignoreCase = true)
-            val isUnassigned = !txBelongsToUser1(tx) && !txBelongsToUser2(tx)
-
-            return srcIsShared || dstIsShared || isExplicitlyShared || isUnassigned
-        }
-
+    // Each tab shows what was paid from that person's accounts (joint accounts under Shared).
+    val filteredTransactions = combine(transactions, accounts, currentFilter, scopeFilter, householdUids) { txList, accList, ownerFilter, scope, (myUid, partnerUid) ->
+        val view = viewOf(ownerFilter)
+        val byId = accList.associateBy { it.accountId }
         txList.filter { tx ->
-            val matchesOwner = when (ownerFilter) {
-                ViewFilter.Combined -> txBelongsToShared(tx)
-                ViewFilter.User1 -> txBelongsToUser1(tx)
-                ViewFilter.User2 -> txBelongsToUser2(tx)
-            }
-            val matchesScope = scope == null || tx.scope == scope
-            matchesOwner && matchesScope
+            (scope == null || tx.scope == scope) && PayerRules.inView(tx, view, byId, myUid, partnerUid)
         }.sortedByDescending { it.timestamp }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -262,8 +205,8 @@ class ExpenseViewModel : ViewModel() {
 
     private val freeToSpendInputs = combine(accounts, transactions, reminders, reserves) { a, t, r, s -> listOf(a, t, r, s) }
 
-    val freeToSpend: StateFlow<com.example.domain.FreeToSpendRules.Breakdown?> =
-        combine(freeToSpendInputs, salaryDay, currentUserUid) { inputs, day, uid ->
+    private fun freeToSpendFor(owner: kotlinx.coroutines.flow.Flow<String?>): StateFlow<com.example.domain.FreeToSpendRules.Breakdown?> =
+        combine(freeToSpendInputs, salaryDay, owner) { inputs, day, uid ->
             if (uid == null) return@combine null
             @Suppress("UNCHECKED_CAST")
             com.example.domain.FreeToSpendRules.compute(
@@ -276,6 +219,12 @@ class ExpenseViewModel : ViewModel() {
                 now = System.currentTimeMillis()
             )
         }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** Mine, whichever dashboard tab is open. */
+    val freeToSpend = freeToSpendFor(currentUserUid)
+
+    /** For the dashboard's selected tab: mine, my partner's, or the joint accounts alone. */
+    val viewFreeToSpend = freeToSpendFor(viewOwnerId)
 
     /** New reserves start counting monthly top-ups from next month; the opening amount is this month's. */
     fun saveReserve(reserve: Reserve) {
@@ -323,14 +272,14 @@ class ExpenseViewModel : ViewModel() {
     }
 
     // CRITICAL RECONCILIATION pipeline for missed SMS due to battery-saver or background termination
-    fun runSmsInboxReconciliation(context: Context) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val lastTimestamp = SmsProcessor.getLastProcessedTimestamp(context)
+    // The returned job ends when the scan does (the dashboard's pull to refresh waits on it).
+    fun runSmsInboxReconciliation(context: Context): kotlinx.coroutines.Job {
+        return viewModelScope.launch(Dispatchers.IO) {
+            var lastTimestamp = SmsProcessor.getLastProcessedTimestamp(context)
             if (lastTimestamp == 0L) {
-                // Initialize default to 1 day ago to prevent scanning extensive device histories on fresh install
-                SmsProcessor.updateLastProcessedTimestamp(context, System.currentTimeMillis() - (24 * 60 * 60 * 1000))
-                Log.d(TAG, "Reconciliation: SharedPreferences timestamp initialized to 1 day ago.")
-                return@launch
+                // First scan: start a day back, not from the whole history of the phone.
+                lastTimestamp = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+                SmsProcessor.updateLastProcessedTimestamp(context, lastTimestamp)
             }
 
             Log.d(TAG, "Reconciliation: Checking SMS ContentProvider starting from $lastTimestamp...")
@@ -398,6 +347,8 @@ class ExpenseViewModel : ViewModel() {
                 val potentialLoanAcc = targetAccountId?.let { id -> rawAccounts.find { it.id == id && it.type == AccountType.LOAN } }
                 
                 val ownerUid = currentAccount?.ownerUserId?.takeIf { it.isNotEmpty() } ?: currentUserUid.value ?: "user_default"
+                // "Paid for" is saved as a user id, so it reads the same on both phones.
+                val paidFor = PayerRules.paidForId(paidBy, currentUserUid.value, spouseUserUid.value)
                 val ownerName = currentAccount?.ownerFirstName?.takeIf { it.isNotEmpty() } ?: currentUserFirstName.value ?: "User"
 
                 if (type == TransactionType.TRANSFER && potentialLoanAcc != null) {
@@ -419,7 +370,7 @@ class ExpenseViewModel : ViewModel() {
                         timestamp = dateMillis,
                         accountId = accountId,
                         targetAccountId = loanAcc.id,
-                        paidByUserId = paidBy,
+                        paidByUserId = paidFor,
                         ownerUserId = ownerUid,
                         ownerFirstName = ownerName,
                         scope = scope,
@@ -439,7 +390,7 @@ class ExpenseViewModel : ViewModel() {
                         category = LedgerRules.LOAN_INTEREST_CATEGORY,
                         timestamp = dateMillis,
                         accountId = accountId,
-                        paidByUserId = paidBy,
+                        paidByUserId = paidFor,
                         ownerUserId = ownerUid,
                         ownerFirstName = ownerName,
                         scope = scope,
@@ -462,7 +413,7 @@ class ExpenseViewModel : ViewModel() {
                     timestamp = dateMillis,
                     accountId = accountId,
                     targetAccountId = targetAccountId,
-                    paidByUserId = paidBy,
+                    paidByUserId = paidFor,
                     ownerUserId = ownerUid,
                     ownerFirstName = ownerName,
                     scope = scope,
@@ -503,7 +454,11 @@ class ExpenseViewModel : ViewModel() {
 
     fun ignoreTransaction(transactionId: String) = saving("Delete") { FirebaseService.deleteTransaction(transactionId) }
 
-    fun updateTransaction(transaction: Transaction) = saving("Update") { FirebaseService.updateTransaction(transaction) }
+    fun updateTransaction(transaction: Transaction) = saving("Update") {
+        // "Paid for" is saved as a user id, so it reads the same on both phones.
+        val paidFor = PayerRules.paidForId(transaction.paidByUserId, currentUserUid.value, spouseUserUid.value)
+        FirebaseService.updateTransaction(if (paidFor == transaction.paidByUserId) transaction else transaction.copy(paidByUserId = paidFor))
+    }
 
     fun deleteTransaction(transactionId: String) = saving("Delete") { FirebaseService.deleteTransaction(transactionId) }
 
