@@ -58,10 +58,17 @@ data class Account(
     val remainingMonths: Int = 0,
     val monthlyEmi: Double = 0.0,
     val reconciledBalance: Double? = null,
+    // For undoing the last reconcile: the adjustment it added ("" for none) and what it replaced.
+    val reconcileAdjustmentId: String = "",
+    val previousReconciledDate: Long? = null,
+    val previousReconciledBalance: Double? = null,
     val billingCycleDay: Int = 0, // Day of month for billing cycle (e.g., 15)
     val paymentDueDay: Int = 0, // Day of month for bill payment due (e.g., 5)
     // Latest statement ("yyyy_MM") an automatic bill reminder was made for; stops deleted bills coming back.
     val lastBillReminderCycle: String = "",
+    // The balance printed in this bank account's latest SMS and when that SMS came, to check the app against.
+    val smsBalance: Double? = null,
+    val smsBalanceDate: Long? = null,
     
     // Custom fields for Chart of Accounts (unified category model)
     val customAccountClass: String = "",

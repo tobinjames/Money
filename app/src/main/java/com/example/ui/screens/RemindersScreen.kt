@@ -418,7 +418,7 @@ fun RemindersScreen(
         
         // Add Reminder Dialog Screen
         if (showAddReminderDialog) {
-            AlertDialog(
+            FormSheet(
                 onDismissRequest = { showAddReminderDialog = false },
                 title = { Text("Schedule Payable", fontWeight = FontWeight.Bold) },
                 confirmButton = {

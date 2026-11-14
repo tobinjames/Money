@@ -229,7 +229,7 @@ fun HouseholdInviteCard() {
 
     if (renaming) {
         var name by remember { mutableStateOf(household ?: "") }
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { renaming = false },
             title = { Text("Rename household") },
             text = {
