@@ -597,6 +597,30 @@ object FirebaseService {
         write(COL_ACCOUNTS, account.accountId, account, merge = true)
     }
 
+    /**
+     * Moves accounts between the user's own Net worth groups: account id to group name ("" for none).
+     * Only that one field is written, so it can't undo anything else saved on the account.
+     */
+    fun setNetWorthGroups(changes: Map<String, String>) {
+        if (changes.isEmpty()) return
+        localAccounts.value = localAccounts.value.map { acc ->
+            changes[acc.accountId]?.let { acc.copy(netWorthGroup = it) } ?: acc
+        }
+        val fs = firestore
+        val accountsCol = col(COL_ACCOUNTS)
+        if (fs == null || accountsCol == null) {
+            Log.w(TAG, "No household open; net worth groups were not saved.")
+            return
+        }
+        changes.entries.chunked(400).forEach { chunk ->
+            val batch = fs.batch()
+            chunk.forEach { (id, group) ->
+                batch.set(accountsCol.document(id), mapOf("netWorthGroup" to group), SetOptions.merge())
+            }
+            batch.commit().addOnFailureListener { Log.e(TAG, "Net worth groups not saved: ${it.message}") }
+        }
+    }
+
     suspend fun deleteAccount(accountId: String) {
         localAccounts.value = localAccounts.value.filter { it.accountId != accountId }
         remove(COL_ACCOUNTS, accountId)

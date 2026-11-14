@@ -59,7 +59,7 @@ object NetWorthRules {
     /** A label for the kind of asset, from the account's group in the chart of accounts. */
     fun kindOf(account: Account): String = when (account.type) {
         AccountType.FIXED_DEPOSIT -> "Fixed deposits"
-        AccountType.MUTUAL_FUND -> "Mutual funds"
+        AccountType.MUTUAL_FUND -> "Investments"
         AccountType.LOAN -> "Loans"
         AccountType.CREDIT_CARD -> "Credit cards"
         AccountType.SAVINGS_ACCOUNT -> when {
@@ -109,6 +109,83 @@ object NetWorthRules {
             byOwner = byOwner,
             owedByKind = owedByKind
         )
+    }
+
+    /** One of the user's own groups, or [UNGROUPED] for everything not in one. */
+    data class Group(
+        val name: String,
+        /** Assets minus what's owed in this group, for the scope. */
+        val net: Double,
+        /** Accounts of this scope in the group with their signed value, largest first. */
+        val members: List<Member>,
+        val custom: Boolean = true
+    )
+
+    data class Member(val account: Account, val value: Double)
+
+    /** Label for the accounts that are in none of the user's groups. */
+    const val UNGROUPED = "Not in a group"
+
+    fun groupName(account: Account): String = account.netWorthGroup.trim()
+
+    /** The names of the user's groups across the whole household, A to Z, whatever the scope. */
+    fun groupNames(accounts: List<Account>): List<String> =
+        accounts.filter { countsForNetWorth(it) }.map { groupName(it) }.filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }.sortedBy { it.lowercase() }
+
+    /**
+     * Net worth split by the user's own groups, largest first, with the accounts in no group last.
+     * Each account is in at most one group, so the groups add up to net worth. Joint accounts are
+     * halved for one partner like everywhere else. Empty when no group has been made.
+     * A group with nothing in this scope (all its accounts are the partner's) still shows, at zero.
+     */
+    fun customGroups(
+        accounts: List<Account>,
+        myUid: String?,
+        scope: Scope,
+        balanceOf: (Account) -> Double = { it.balance }
+    ): List<Group> {
+        val names = groupNames(accounts)
+        if (names.isEmpty()) return emptyList()
+        val members = accounts.filter { countsForNetWorth(it) && share(it, scope, myUid) > 0.0 }
+            .map { Member(it, signed(it, balanceOf(it)) * share(it, scope, myUid)) }
+        fun group(name: String, list: List<Member>, custom: Boolean) =
+            Group(name, list.sumOf { it.value }, list.sortedByDescending { kotlin.math.abs(it.value) }, custom)
+
+        val byName = members.groupBy { groupName(it.account).lowercase() }
+        val groups = names.map { group(it, byName[it.lowercase()].orEmpty(), true) }.sortedByDescending { it.net }
+        val rest = byName[""].orEmpty()
+        return if (rest.isEmpty()) groups else groups + group(UNGROUPED, rest, false)
+    }
+
+    /** Donut slices for the groups: only groups with a positive net get a slice. */
+    fun groupSlices(groups: List<Group>): List<Slice> {
+        val positive = groups.filter { it.net > 0.005 }
+        val total = positive.sumOf { it.net }
+        if (total <= 0.0) return emptyList()
+        return positive.map { Slice(it.name, it.net, it.net / total) }.sortedByDescending { it.amount }
+    }
+
+    /**
+     * What to save when a group is created, edited, renamed or removed: account id to its new
+     * group name. [memberIds] end up in [name]; accounts that were in [oldName] and are no longer
+     * picked leave it. A blank [name] removes [oldName]. Accounts that don't change are left out.
+     */
+    fun groupChanges(accounts: List<Account>, oldName: String?, name: String, memberIds: Set<String>): Map<String, String> {
+        val newName = name.trim()
+        val old = oldName?.trim().orEmpty()
+        val changes = LinkedHashMap<String, String>()
+        accounts.filter { countsForNetWorth(it) }.forEach { acc ->
+            val current = groupName(acc)
+            val wasIn = old.isNotEmpty() && current.equals(old, ignoreCase = true)
+            val target = when {
+                newName.isNotEmpty() && acc.accountId in memberIds -> newName
+                wasIn -> ""
+                else -> return@forEach
+            }
+            if (acc.netWorthGroup != target) changes[acc.accountId] = target
+        }
+        return changes
     }
 
     /**

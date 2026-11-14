@@ -92,6 +92,10 @@ fun NetWorthScreen(viewModel: ExpenseViewModel, onBackClick: () -> Unit) {
             }
         }
     }
+    val groups = remember(accounts, myUid, scope) { NetWorthRules.customGroups(accounts, myUid, scope) }
+    val groupNames = remember(accounts) { NetWorthRules.groupNames(accounts) }
+    // "" while making a new group, a group's name while editing it, null when the sheet is closed.
+    var groupSheet by rememberSaveable { mutableStateOf<String?>(null) }
     val scopeLabel = when (scope) {
         Scope.MINE -> myName
         Scope.PARTNER -> partnerName
@@ -127,7 +131,18 @@ fun NetWorthScreen(viewModel: ExpenseViewModel, onBackClick: () -> Unit) {
                 onRange = { range = it }
             )
         }
-        item { AllocationCard(s, showOwners = scope == Scope.COMBINED) }
+        item { AllocationCard(s, showOwners = scope == Scope.COMBINED, groupSlices = NetWorthRules.groupSlices(groups)) }
+        item {
+            NetWorthGroupsCard(
+                groups = groups,
+                ownerLabel = { acc ->
+                    val name = ownerName(acc)
+                    if (name == "Joint" && scope != Scope.COMBINED) "Joint, half" else name
+                },
+                onNew = { groupSheet = "" },
+                onEdit = { groupSheet = it }
+            )
+        }
         item {
             AccountsOverviewCard(
                 title = "$scopeLabel accounts",
@@ -139,10 +154,23 @@ fun NetWorthScreen(viewModel: ExpenseViewModel, onBackClick: () -> Unit) {
             )
         }
     }
+
+    groupSheet?.let { open ->
+        val editing = open.takeIf { it.isNotEmpty() }
+        NetWorthGroupSheet(
+            accounts = remember(accounts) { accounts.filter { NetWorthRules.countsForNetWorth(it) } },
+            existingNames = groupNames,
+            editing = editing,
+            ownerLabel = ownerName,
+            onSave = { name, ids -> viewModel.saveNetWorthGroup(editing, name, ids); groupSheet = null },
+            onRemove = { viewModel.saveNetWorthGroup(editing, "", emptySet()); groupSheet = null },
+            onDismiss = { groupSheet = null }
+        )
+    }
 }
 
 @Composable
-private fun NetWorthCard(tag: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun NetWorthCard(tag: String, content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).testTag(tag),
         shape = RoundedCornerShape(20.dp),
@@ -332,17 +360,31 @@ private fun LineChart(points: List<NetWorthRules.Point>, selected: Int, onSelect
 }
 
 @Composable
-private fun AllocationCard(s: NetWorthRules.Summary, showOwners: Boolean) {
-    var byOwner by rememberSaveable { mutableStateOf(false) }
-    val owners = showOwners && byOwner
-    val slices = if (owners) s.byOwner else s.byKind
+private fun AllocationCard(s: NetWorthRules.Summary, showOwners: Boolean, groupSlices: List<NetWorthRules.Slice>) {
+    // "TYPE", "GROUP" (the user's own groups, once there are some) or "PERSON" (Combined only).
+    var wanted by rememberSaveable { mutableStateOf("TYPE") }
+    val showGroups = groupSlices.isNotEmpty()
+    val mode = when {
+        wanted == "PERSON" && showOwners -> "PERSON"
+        wanted == "GROUP" && showGroups -> "GROUP"
+        else -> "TYPE"
+    }
+    val slices = when (mode) {
+        "PERSON" -> s.byOwner
+        "GROUP" -> groupSlices
+        else -> s.byKind
+    }
     NetWorthCard("net_worth_allocation") {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Where it is", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            if (showOwners) {
-                FilterChip(selected = !byOwner, onClick = { byOwner = false }, label = { Text("By type") })
-                Spacer(Modifier.width(6.dp))
-                FilterChip(selected = byOwner, onClick = { byOwner = true }, label = { Text("By person") })
+        Text("Where it is", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        if (showOwners || showGroups) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                FilterChip(selected = mode == "TYPE", onClick = { wanted = "TYPE" }, label = { Text("By type") })
+                if (showGroups) {
+                    FilterChip(selected = mode == "GROUP", onClick = { wanted = "GROUP" }, label = { Text("By group") })
+                }
+                if (showOwners) {
+                    FilterChip(selected = mode == "PERSON", onClick = { wanted = "PERSON" }, label = { Text("By person") })
+                }
             }
         }
         if (slices.isEmpty()) {
@@ -369,7 +411,7 @@ private fun AllocationCard(s: NetWorthRules.Summary, showOwners: Boolean) {
                         }
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(if (owners) "Net" else "Assets", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (mode == "TYPE") "Assets" else "Net", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(formatCompact(slices.sumOf { it.amount }), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -378,7 +420,7 @@ private fun AllocationCard(s: NetWorthRules.Summary, showOwners: Boolean) {
                 }
             }
         }
-        if (!owners && s.owedByKind.isNotEmpty()) {
+        if (mode == "TYPE" && s.owedByKind.isNotEmpty()) {
             HorizontalDivider(Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             Text("What's owed", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
             s.owedByKind.forEach { sl ->

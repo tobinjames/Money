@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.domain.LedgerRules
+import com.example.domain.NetWorthRules
 import com.example.data.*
 import com.example.sms.SmsProcessor
 import com.example.ai.GeminiSmsParser
@@ -524,7 +525,8 @@ class ExpenseViewModel : ViewModel() {
         lastFourDigits: String = "",
         iconName: String = "",
         billingCycleDay: Int = 0,
-        paymentDueDay: Int = 0
+        paymentDueDay: Int = 0,
+        netWorthGroup: String = ""
     ) {
         viewModelScope.launch {
             val finalClass = accountClass ?: when (type) {
@@ -576,11 +578,22 @@ class ExpenseViewModel : ViewModel() {
                 // Persist the chosen grouping; without it every liability showed up as a credit card.
                 customAccountClass = finalClass,
                 customMainCategory = finalMain,
-                customSubCategory = finalSub
+                customSubCategory = finalSub,
+                netWorthGroup = netWorthGroup
             )
             // Saving the account also starts one background scan of older bank SMS for it.
             FirebaseService.addAccount(acc)
         }
+    }
+
+    /**
+     * Saves one of the user's own Net worth groups: [memberIds] end up in [name], and accounts that
+     * were in [oldName] (when renaming or editing) but are no longer picked leave it.
+     * A blank [name] removes the group [oldName]; its accounts stay.
+     */
+    fun saveNetWorthGroup(oldName: String?, name: String, memberIds: Set<String>) {
+        val changes = NetWorthRules.groupChanges(accounts.value, oldName, name, memberIds)
+        FirebaseService.setNetWorthGroups(changes)
     }
 
     fun updateAccountLastFourDigits(accountId: String, lastFourDigits: String) {

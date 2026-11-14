@@ -70,6 +70,9 @@ data class Account(
     val iconName: String = "",
     @get:PropertyName("isSystemDefault") @set:PropertyName("isSystemDefault")
     var isSystemDefault: Boolean = false,
+
+    // The user's own group on the Net worth screen ("Emergency fund", "Retirement"); "" for none.
+    val netWorthGroup: String = "",
     
     // computed balance
     val balance: Double = 0.0
