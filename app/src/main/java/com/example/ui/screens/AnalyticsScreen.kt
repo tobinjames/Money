@@ -2061,7 +2061,7 @@ fun AnalyticsScreen(
         
         val activeCategoryDisplay = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
 
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { showAddBudgetDialog = false },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2264,7 +2264,7 @@ fun AnalyticsScreen(
         
         val activeCategoryDisplay = if (budgetScope == 1 || selectedSubCategory.isBlank()) selectedMainCategory else selectedSubCategory
 
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { showEditBudgetDialog = null },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {

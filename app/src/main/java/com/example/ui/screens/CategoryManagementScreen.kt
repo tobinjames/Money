@@ -54,6 +54,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.Account
+import com.example.data.Transaction
 import com.example.data.TransactionType
 import com.example.domain.FreeToSpendRules
 import com.example.domain.LedgerRules
@@ -164,6 +165,7 @@ fun CategoryManagementScreen(
                                 account = acc,
                                 subtitle = accountSubtitle(acc, myUid, partnerName),
                                 now = now,
+                                transactions = transactions,
                                 // Edit the stored entry, not the copy carrying a worked-out balance.
                                 onClick = { editingAccount = categories.find { it.accountId == acc.accountId } ?: acc },
                                 onReconcile = { reconcilingAccount = acc }
@@ -233,7 +235,7 @@ fun CategoryManagementScreen(
         CategoryEditorSheet(viewModel = viewModel, existing = cat, onDismiss = { editingCategory = null })
     }
     reconcilingAccount?.let { acc ->
-        ReconcileAccountDialog(account = acc, onDismiss = { reconcilingAccount = null }, viewModel = viewModel)
+        ReconcileSheet(account = acc, onDismiss = { reconcilingAccount = null }, viewModel = viewModel)
     }
 }
 
@@ -300,14 +302,18 @@ private fun AccountRow(
     account: Account,
     subtitle: String,
     now: Long,
+    transactions: List<Transaction>,
     onClick: () -> Unit,
     onReconcile: () -> Unit
 ) {
     val isLiability = account.accountType == "LIABILITY"
     val owes = isLiability && abs(account.balance) > 0.5
-    val days = ReconcileRules.daysSince(account, now)
+    // The balance in the bank's latest SMS against the app at that moment (bank accounts only).
+    val bank = remember(account, transactions) { ReconcileRules.bankCheck(account, transactions) }
+    val days = remember(account, transactions, now) { ReconcileRules.daysSince(account, now, transactions) }
     val overdue = days >= ReconcileRules.staleAfterDays(account)
     val reconciledText = when {
+        bank?.matches == true -> "Matches the bank SMS of ${formatDate(bank.at)}"
         account.lastReconciledDate == null -> "Never checked against the bank"
         days <= 0 -> "Checked today"
         else -> "Checked $days day${if (days == 1) "" else "s"} ago"
@@ -347,11 +353,24 @@ private fun AccountRow(
                     modifier = Modifier.padding(start = 52.dp, top = 6.dp)
                 )
             }
+            if (bank != null && !bank.matches) {
+                Text(
+                    "Bank SMS of ${formatDate(bank.at)} says ${formatAmount(bank.bankBalance)}. " +
+                        "The app is ${formatAmount(abs(bank.difference))} ${if (bank.difference > 0) "lower" else "higher"}.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(start = 52.dp, top = 6.dp).testTag("bank_difference_${account.id}")
+                )
+            }
             Row(Modifier.fillMaxWidth().padding(start = 52.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     reconciledText,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (overdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = when {
+                        bank?.matches == true -> MaterialTheme.colorScheme.primary
+                        overdue -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     modifier = Modifier.weight(1f)
                 )
                 OutlinedButton(

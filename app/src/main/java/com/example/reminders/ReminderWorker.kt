@@ -146,7 +146,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             reminders = FirebaseService.getReminders().first()
             if (AlertPrefs.reminderAlerts(context)) notify(context, reminders, accounts, now)
             if (AlertPrefs.budgetAlerts(context)) notifyBudgets(context, FirebaseService.getBudgets().first(), txs, accounts, now)
-            if (AlertPrefs.reconcileAlerts(context)) notifyReconcile(context, accounts, now)
+            if (AlertPrefs.reconcileAlerts(context)) notifyReconcile(context, accounts, txs, now)
             if (AlertPrefs.monthlySummary(context)) notifyMonthlySummary(context, txs, accounts, now)
             if (AlertPrefs.lowBalanceAlerts(context)) {
                 reserves = FirebaseService.getReserves().first()
@@ -191,9 +191,9 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
 
         /** Weekend nudge (Friday evening, Saturday, Sunday; once a day) for accounts not reconciled in 30 days. */
-        private fun notifyReconcile(context: Context, accounts: List<com.example.data.Account>, now: Long) {
+        private fun notifyReconcile(context: Context, accounts: List<com.example.data.Account>, txs: List<com.example.data.Transaction>, now: Long) {
             if (!ReconcileRules.isWeekendReminderTime(now) || !canNotify(context)) return
-            val stale = ReconcileRules.stale(FirebaseService.getCurrentUserId(), accounts, now)
+            val stale = ReconcileRules.stale(FirebaseService.getCurrentUserId(), accounts, now, txs)
             if (stale.isEmpty()) return
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val today = ReconcileRules.dayKey(now)
@@ -203,7 +203,7 @@ class ReminderWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val title = if (stale.size == 1) "🧾 Time to reconcile ${stale[0].accountName}"
                 else "🧾 ${stale.size} accounts to reconcile"
             val text = stale.joinToString("\n") { a ->
-                val days = ReconcileRules.daysSince(a, now)
+                val days = ReconcileRules.daysSince(a, now, txs)
                 "${a.accountName}: " + if (a.lastReconciledDate == null) "never reconciled" else "last done $days days ago"
             } + "\nCheck each balance against your bank or card app in Accounts & categories."
             post(context, MONEY_CHANNEL, "Free to spend", RECONCILE_SENT.hashCode(), title, text)

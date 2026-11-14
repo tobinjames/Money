@@ -319,7 +319,7 @@ private fun ReserveDialog(
 
     val valid = name.isNotBlank() && accountId.isNotBlank()
 
-    AlertDialog(
+    FormSheet(
         onDismissRequest = onDismiss,
         title = { Text(if (isNew) "New reserve" else "Edit reserve") },
         text = {
@@ -399,7 +399,7 @@ private fun ReserveDialog(
 @Composable
 private fun UseReserveDialog(reserve: Reserve, onDismiss: () -> Unit, onUse: (Double) -> Unit) {
     var amount by remember { mutableStateOf("%.0f".format(reserve.amount)) }
-    AlertDialog(
+    FormSheet(
         onDismissRequest = onDismiss,
         title = { Text("Spent from ${reserve.name}") },
         text = {

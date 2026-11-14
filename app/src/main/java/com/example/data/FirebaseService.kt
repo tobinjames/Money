@@ -597,6 +597,14 @@ object FirebaseService {
         write(COL_ACCOUNTS, account.accountId, account, merge = true)
     }
 
+    /** Keeps the balance from a bank SMS, unless a newer one is already saved. Only these two fields are written. */
+    fun recordBankBalance(accountId: String, balance: Double, at: Long) {
+        val account = localAccounts.value.find { it.accountId == accountId } ?: return
+        if (account.smsBalanceDate?.let { it >= at } == true) return
+        upsert(localAccounts, account.copy(smsBalance = balance, smsBalanceDate = at)) { it.accountId == accountId }
+        write(COL_ACCOUNTS, accountId, mapOf("smsBalance" to balance, "smsBalanceDate" to at), merge = true)
+    }
+
     suspend fun deleteAccount(accountId: String) {
         localAccounts.value = localAccounts.value.filter { it.accountId != accountId }
         remove(COL_ACCOUNTS, accountId)

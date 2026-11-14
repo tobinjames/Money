@@ -925,7 +925,8 @@ fun TransactionsScreen(
             var showAddCategoryPicker by remember { mutableStateOf(false) }
             var showAddTagField by remember { mutableStateOf(false) }
 
-            AlertDialog(
+            FormSheet(
+                scrollable = false,
                 onDismissRequest = { 
                     showAddTagField = false
                     showAddDialog = false 
@@ -1443,21 +1444,27 @@ fun TransactionsScreen(
                 isLocked || isOriginalLocked || isTargetLocked || isOriginalTargetLocked
             }
 
+            // A reconciled entry keeps its amount, date and accounts; the rest can still be changed.
+            val moneyUnchanged = editAmountStr.toDoubleOrNull() == editingTx.amount && editDateMillis == editingTx.timestamp &&
+                editTxType == editingTx.type && editAccountId == editingTx.accountId &&
+                (editTxType != TransactionType.TRANSFER || editTargetAccountId == editingTx.targetAccountId)
+
             LaunchedEffect(isTxLocked) {
                 if (isTxLocked) {
-                    editErrorText = "Locked Period: Transaction belongs to a closed/reconciled accounting session."
+                    editErrorText = "Reconciled: the amount, date and accounts are locked. You can still change the category, note and tag."
                 } else {
                     editErrorText = null
                 }
             }
 
-            AlertDialog(
+            FormSheet(
+                scrollable = false,
                 onDismissRequest = { editingTransaction = null },
                 title = { Text("Edit/Delete Transaction Ledger Entry", fontWeight = FontWeight.Bold) },
                 confirmButton = {
                     Button(
                         onClick = {
-                            if (!isTxLocked) {
+                            if (!isTxLocked || moneyUnchanged) {
                                 val finalCat = if (editTxType == TransactionType.TRANSFER) "Transfer" else editCategoryId
                                 val updated = editingTx.copy(
                                     amount = editAmountStr.toDoubleOrNull() ?: editingTx.amount,
@@ -1485,7 +1492,7 @@ fun TransactionsScreen(
                                 editingTransaction = null
                             }
                         },
-                        enabled = !isTxLocked && editAmountStr.toDoubleOrNull() != null && editNarration.trim().isNotEmpty(),
+                        enabled = (!isTxLocked || moneyUnchanged) && editAmountStr.toDoubleOrNull() != null && editNarration.trim().isNotEmpty(),
                         colors = ButtonDefaults.buttonColors(
                             disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                         )
@@ -1642,7 +1649,7 @@ fun TransactionsScreen(
                                 value = editNarration,
                                 onValueChange = { editNarration = it },
                                 label = { Text("Vendor / Narration", fontSize = 11.sp) },
-                                enabled = !isTxLocked,
+                                enabled = true,
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true
@@ -1652,7 +1659,7 @@ fun TransactionsScreen(
                         item {
                             if (!showEditTagField && editTag.isBlank()) {
                                 Surface(
-                                    onClick = { if (!isTxLocked) showEditTagField = true },
+                                    onClick = { showEditTagField = true },
                                     shape = RoundedCornerShape(10.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
                                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
@@ -1727,7 +1734,7 @@ fun TransactionsScreen(
                                                 color = MaterialTheme.colorScheme.primary
                                             )
                                         }
-                                        if (!isTxLocked) {
+                                        if (true) {
                                             IconButton(
                                                 onClick = {
                                                     editTag = ""
@@ -1750,7 +1757,7 @@ fun TransactionsScreen(
                                         onValueChange = { editTag = it },
                                         placeholder = { Text("#Trip, #Renovation, #Event", fontSize = 11.sp) },
                                         leadingIcon = { Text("#", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
-                                        enabled = !isTxLocked,
+                                        enabled = true,
                                         shape = RoundedCornerShape(10.dp),
                                         modifier = Modifier.fillMaxWidth(),
                                         singleLine = true
@@ -1767,7 +1774,7 @@ fun TransactionsScreen(
                                                     color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                                                     border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
                                                     shape = RoundedCornerShape(8.dp),
-                                                    modifier = Modifier.clickable(enabled = !isTxLocked) { editTag = exTag }
+                                                    modifier = Modifier.clickable(enabled = true) { editTag = exTag }
                                                 ) {
                                                     Text(
                                                         text = if (exTag.startsWith("#")) exTag else "#$exTag",
@@ -1805,7 +1812,7 @@ fun TransactionsScreen(
                                             else -> false
                                         }
                                         Surface(
-                                            onClick = { if (!isTxLocked) editPaidBy = v },
+                                            onClick = { editPaidBy = v },
                                             shape = RoundedCornerShape(8.dp),
                                             color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                                             border = BorderStroke(
@@ -1877,7 +1884,7 @@ fun TransactionsScreen(
                                     onClick = { showEditCategoryPicker = true },
                                     onQuickSelect = { editCategoryId = it },
                                     quickSuggestions = quickCats,
-                                    enabled = !isTxLocked,
+                                    enabled = true,
                                     modifier = Modifier.padding(vertical = 4.dp)
                                 )
                             }
@@ -1934,7 +1941,7 @@ fun TransactionsScreen(
                                             Switch(
                                                 checked = createSmartRule,
                                                 onCheckedChange = { createSmartRule = it },
-                                                enabled = !isTxLocked,
+                                                enabled = true,
                                                 modifier = Modifier.testTag("toggle_smart_rule_in_edit")
                                             )
                                         }
@@ -1948,7 +1955,7 @@ fun TransactionsScreen(
                                                 placeholder = { Text("e.g. SWIGGY, UBER, NETFLIX", fontSize = 11.sp) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 singleLine = true,
-                                                enabled = !isTxLocked,
+                                                enabled = true,
                                                 shape = RoundedCornerShape(8.dp),
                                                 leadingIcon = {
                                                     Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -1959,12 +1966,12 @@ fun TransactionsScreen(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .clickable(enabled = !isTxLocked) { applyToHistory = !applyToHistory }
+                                                    .clickable(enabled = true) { applyToHistory = !applyToHistory }
                                             ) {
                                                 Checkbox(
                                                     checked = applyToHistory,
                                                     onCheckedChange = { applyToHistory = it },
-                                                    enabled = !isTxLocked,
+                                                    enabled = true,
                                                     modifier = Modifier.size(24.dp)
                                                 )
                                                 Spacer(modifier = Modifier.width(8.dp))

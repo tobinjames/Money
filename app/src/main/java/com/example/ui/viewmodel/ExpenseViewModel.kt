@@ -583,46 +583,81 @@ class ExpenseViewModel : ViewModel() {
         }
     }
 
-    fun updateAccountLastFourDigits(accountId: String, lastFourDigits: String) {
-        viewModelScope.launch {
-            val oldAcc = accounts.value.find { it.id == accountId } ?: return@launch
-            val updated = oldAcc.copy(lastFourDigits = lastFourDigits)
-            FirebaseService.updateAccount(updated)
-        }
-    }
-
     /** Items up to [closingDate] on this account that are still waiting for review. */
-    fun pendingBefore(accountId: String, closingDate: Long): List<Transaction> {
-        val end = LedgerRules.endOfDay(closingDate)
+    fun pendingBefore(accountId: String, closingDate: Long, exactTime: Boolean = false): List<Transaction> {
+        val end = if (exactTime) closingDate else LedgerRules.endOfDay(closingDate)
         return transactions.value.filter {
             it.status == TransactionStatus.PENDING_REVIEW && !it.isIgnored &&
                 (it.accountId == accountId || it.targetAccountId == accountId) && it.timestamp <= end
         }
     }
 
-    fun reconcileAccount(accountId: String, closingDate: Long, statementBalance: Double) {
+    /**
+     * [exactTime]: [statementBalance] is the balance at [closingDate] itself (from a bank SMS),
+     * not at the end of that day.
+     */
+    fun reconcileAccount(accountId: String, closingDate: Long, statementBalance: Double, exactTime: Boolean = false) {
         viewModelScope.launch {
             val oldAcc = accounts.value.find { it.id == accountId } ?: return@launch
+            var adjustmentId = ""
             try {
                 // 1. Settle what is still waiting for review up to the closing date, before the
                 // period locks: items already counted in the balance are confirmed as they are,
                 // suspected duplicates (not counted) are set aside.
-                pendingBefore(accountId, closingDate).forEach { tx ->
+                pendingBefore(accountId, closingDate, exactTime).forEach { tx ->
                     FirebaseService.updateTransaction(
                         if (tx.isProbablyDuplicate) tx.copy(isIgnored = true) else tx.copy(status = TransactionStatus.CONFIRMED)
                     )
                 }
                 // 2. Balances come from the ledger, so a difference from the statement is booked
                 // as an adjustment entry on the closing date.
-                LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance)
-                    ?.let { FirebaseService.addTransaction(it) }
+                adjustmentId = LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance, exactTime)
+                    ?.also { FirebaseService.addTransaction(it) }?.transactionId.orEmpty()
             } catch (e: Exception) {
                 Log.e(TAG, "Could not reconcile: ${e.message}", e)
                 triggerToast("Could not reconcile: ${e.message}")
                 return@launch
             }
             // 3. Lock the period.
-            FirebaseService.updateAccount(oldAcc.copy(lastReconciledDate = closingDate, reconciledBalance = statementBalance))
+            // Saved onto the latest copy, so a bank SMS balance that came in meanwhile is kept.
+            val latest = accounts.value.find { it.id == accountId } ?: oldAcc
+            FirebaseService.updateAccount(
+                latest.copy(
+                    lastReconciledDate = closingDate,
+                    reconciledBalance = statementBalance,
+                    reconcileAdjustmentId = adjustmentId,
+                    previousReconciledDate = oldAcc.lastReconciledDate,
+                    previousReconciledBalance = oldAcc.reconciledBalance
+                )
+            )
+        }
+    }
+
+    /**
+     * Takes back the last reconcile: removes the adjustment it added and puts the lock back where
+     * it was before (or removes it). Items it confirmed from review stay confirmed.
+     */
+    fun undoReconcile(accountId: String) {
+        viewModelScope.launch {
+            val acc = accounts.value.find { it.id == accountId } ?: return@launch
+            if (acc.lastReconciledDate == null) return@launch
+            try {
+                if (acc.reconcileAdjustmentId.isNotBlank()) FirebaseService.deleteTransaction(acc.reconcileAdjustmentId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not undo the reconcile: ${e.message}", e)
+                triggerToast("Could not undo the reconcile: ${e.message}")
+                return@launch
+            }
+            FirebaseService.updateAccount(
+                acc.copy(
+                    lastReconciledDate = acc.previousReconciledDate,
+                    reconciledBalance = acc.previousReconciledBalance,
+                    reconcileAdjustmentId = "",
+                    previousReconciledDate = null,
+                    previousReconciledBalance = null
+                )
+            )
+            triggerToast("Reconcile undone for ${acc.name}")
         }
     }
 

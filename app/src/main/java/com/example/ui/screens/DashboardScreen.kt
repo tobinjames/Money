@@ -537,8 +537,18 @@ fun DashboardScreen(
 
         // ACCOUNTS: your bank & cash and credit cards (joint ones too); net worth has its own screen
         item {
+            // Bank accounts whose latest SMS balance differs from the app's figure at that moment.
+            val bankNotes = remember(allAccountsState, allTransactionsState) {
+                allAccountsState.mapNotNull { acc ->
+                    com.example.domain.ReconcileRules.bankCheck(acc, allTransactionsState)?.takeIf { !it.matches }?.let { check ->
+                        acc.accountId to "Bank SMS says ${formatAmount(check.bankBalance)}: the app is " +
+                            "${formatAmount(kotlin.math.abs(check.difference))} ${if (check.difference > 0) "lower" else "higher"}. Reconcile in Accounts."
+                    }
+                }.toMap()
+            }
             AccountsOverviewCard(
                 title = "In hand minus card dues",
+                notes = bankNotes,
                 accounts = allAccountsState.filter { acc ->
                     currentUserUid?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: true
                 },
@@ -731,7 +741,6 @@ fun DashboardScreen(
                             
                             Button(
                                 onClick = { editingTransaction = tx },
-                                enabled = !isLocked,
                                 modifier = Modifier.testTag("approve_review_btn_${tx.id}").height(32.dp),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) {
@@ -872,21 +881,27 @@ fun DashboardScreen(
             isLocked || isOriginalLocked || isTargetLocked || isOriginalTargetLocked
         }
 
+        // A reconciled entry keeps its amount, date and accounts; the rest can still be changed.
+        val moneyUnchanged = editAmountStr.toDoubleOrNull() == editingTx.amount && editDateMillis == editingTx.timestamp &&
+            editTxType == editingTx.type && editAccountId == editingTx.accountId &&
+            (editTxType != TransactionType.TRANSFER || editTargetAccountId == editingTx.targetAccountId)
+
         LaunchedEffect(isTxLocked) {
             if (isTxLocked) {
-                editErrorText = "Locked Period: Transaction belongs to a closed/reconciled accounting session."
+                editErrorText = "Reconciled: the amount, date and accounts are locked. You can still change the category, note and tag."
             } else {
                 editErrorText = null
             }
         }
 
-        AlertDialog(
+        FormSheet(
+            scrollable = false,
             onDismissRequest = { editingTransaction = null },
             title = { Text("Edit & Approve Pending Transaction", fontWeight = FontWeight.Bold) },
             confirmButton = {
                 Button(
                     onClick = {
-                        if (!isTxLocked) {
+                        if (!isTxLocked || moneyUnchanged) {
                             val finalCat = if (editTxType == TransactionType.TRANSFER) "Transfer" else editCategoryId
                             val updated = editingTx.copy(
                                 amount = editAmountStr.toDoubleOrNull() ?: editingTx.amount,
@@ -915,7 +930,7 @@ fun DashboardScreen(
                             editingTransaction = null
                         }
                     },
-                    enabled = !isTxLocked && editAmountStr.toDoubleOrNull() != null && editNarration.trim().isNotEmpty(),
+                    enabled = (!isTxLocked || moneyUnchanged) && editAmountStr.toDoubleOrNull() != null && editNarration.trim().isNotEmpty(),
                     colors = ButtonDefaults.buttonColors(
                         disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                     )
@@ -1071,7 +1086,7 @@ fun DashboardScreen(
                             value = editNarration,
                             onValueChange = { editNarration = it },
                             label = { Text("Vendor / Narration", fontSize = 11.sp) },
-                            enabled = !isTxLocked,
+                            enabled = true,
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
@@ -1081,7 +1096,7 @@ fun DashboardScreen(
                     item {
                         if (!showEditTagField && editTag.isBlank()) {
                             Surface(
-                                onClick = { if (!isTxLocked) showEditTagField = true },
+                                onClick = { showEditTagField = true },
                                 shape = RoundedCornerShape(10.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
@@ -1156,7 +1171,7 @@ fun DashboardScreen(
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                     }
-                                    if (!isTxLocked) {
+                                    if (true) {
                                         IconButton(
                                             onClick = {
                                                 editTag = ""
@@ -1179,7 +1194,7 @@ fun DashboardScreen(
                                     onValueChange = { editTag = it },
                                     placeholder = { Text("#Trip, #Renovation, #Event", fontSize = 11.sp) },
                                     leadingIcon = { Text("#", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
-                                    enabled = !isTxLocked,
+                                    enabled = true,
                                     shape = RoundedCornerShape(10.dp),
                                     modifier = Modifier.fillMaxWidth(),
                                     singleLine = true
@@ -1209,7 +1224,7 @@ fun DashboardScreen(
                                         else -> false
                                     }
                                     Surface(
-                                        onClick = { if (!isTxLocked) editPaidBy = v },
+                                        onClick = { editPaidBy = v },
                                         shape = RoundedCornerShape(8.dp),
                                         color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                                         border = BorderStroke(
@@ -1278,7 +1293,7 @@ fun DashboardScreen(
                                 onClick = { showEditCategoryPicker = true },
                                 onQuickSelect = { editCategoryId = it },
                                 quickSuggestions = quickCats,
-                                enabled = !isTxLocked,
+                                enabled = true,
                                 modifier = Modifier.padding(vertical = 4.dp)
                             )
                         }
@@ -1334,7 +1349,7 @@ fun DashboardScreen(
                                             Switch(
                                                 checked = createSmartRule,
                                                 onCheckedChange = { createSmartRule = it },
-                                                enabled = !isTxLocked,
+                                                enabled = true,
                                                 modifier = Modifier.testTag("toggle_smart_rule_in_dashboard_edit")
                                             )
                                         }
@@ -1348,7 +1363,7 @@ fun DashboardScreen(
                                                 placeholder = { Text("e.g. SWIGGY, UBER, NETFLIX", fontSize = 11.sp) },
                                                 modifier = Modifier.fillMaxWidth(),
                                                 singleLine = true,
-                                                enabled = !isTxLocked,
+                                                enabled = true,
                                                 shape = RoundedCornerShape(8.dp),
                                                 leadingIcon = {
                                                     Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -1359,12 +1374,12 @@ fun DashboardScreen(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .clickable(enabled = !isTxLocked) { applyToHistory = !applyToHistory }
+                                                    .clickable(enabled = true) { applyToHistory = !applyToHistory }
                                             ) {
                                                 Checkbox(
                                                     checked = applyToHistory,
                                                     onCheckedChange = { applyToHistory = it },
-                                                    enabled = !isTxLocked,
+                                                    enabled = true,
                                                     modifier = Modifier.size(24.dp)
                                                 )
                                                 Spacer(modifier = Modifier.width(8.dp))
