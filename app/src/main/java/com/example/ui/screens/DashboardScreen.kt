@@ -537,8 +537,18 @@ fun DashboardScreen(
 
         // ACCOUNTS: your bank & cash and credit cards (joint ones too); net worth has its own screen
         item {
+            // Bank accounts whose latest SMS balance differs from the app's figure at that moment.
+            val bankNotes = remember(allAccountsState, allTransactionsState) {
+                allAccountsState.mapNotNull { acc ->
+                    com.example.domain.ReconcileRules.bankCheck(acc, allTransactionsState)?.takeIf { !it.matches }?.let { check ->
+                        acc.accountId to "Bank SMS says ${formatAmount(check.bankBalance)}: the app is " +
+                            "${formatAmount(kotlin.math.abs(check.difference))} ${if (check.difference > 0) "lower" else "higher"}. Reconcile in Accounts."
+                    }
+                }.toMap()
+            }
             AccountsOverviewCard(
                 title = "In hand minus card dues",
+                notes = bankNotes,
                 accounts = allAccountsState.filter { acc ->
                     currentUserUid?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: true
                 },
@@ -880,7 +890,8 @@ fun DashboardScreen(
             }
         }
 
-        AlertDialog(
+        FormSheet(
+            scrollable = false,
             onDismissRequest = { editingTransaction = null },
             title = { Text("Edit & Approve Pending Transaction", fontWeight = FontWeight.Bold) },
             confirmButton = {

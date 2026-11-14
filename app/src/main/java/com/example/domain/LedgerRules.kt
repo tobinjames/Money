@@ -149,15 +149,17 @@ object LedgerRules {
     /**
      * The entry that brings an account's ledger balance on [closingDate] to [statementBalance].
      * Returns null when they already agree. For loans, [statementBalance] is the outstanding
-     * principal and may be given with either sign.
+     * principal and may be given with either sign. [exactTime] compares at [closingDate] itself
+     * (a balance from a bank SMS) rather than at the end of that day (a statement).
      */
     fun reconciliationAdjustment(
         account: Account,
         ledgerTxs: List<Transaction>,
         closingDate: Long,
-        statementBalance: Double
+        statementBalance: Double,
+        exactTime: Boolean = false
     ): Transaction? {
-        val asOf = endOfDay(closingDate)
+        val asOf = if (exactTime) closingDate else endOfDay(closingDate)
         val ledgerBalance = balance(account, ledgerTxs, asOf)
         val isLoan = account.type == AccountType.LOAN
         // Work in "natural" terms: asset balance, card dues, or loan outstanding (all positive-up).

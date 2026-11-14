@@ -62,6 +62,9 @@ data class Account(
     val paymentDueDay: Int = 0, // Day of month for bill payment due (e.g., 5)
     // Latest statement ("yyyy_MM") an automatic bill reminder was made for; stops deleted bills coming back.
     val lastBillReminderCycle: String = "",
+    // The balance printed in this bank account's latest SMS and when that SMS came, to check the app against.
+    val smsBalance: Double? = null,
+    val smsBalanceDate: Long? = null,
     
     // Custom fields for Chart of Accounts (unified category model)
     val customAccountClass: String = "",

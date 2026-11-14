@@ -37,6 +37,8 @@ fun AccountsOverviewCard(
     accounts: List<Account>,
     ownerLabel: (Account) -> String,
     currentOnly: Boolean = false,
+    // Account id to a short warning shown under that account (the bank's SMS balance differs).
+    notes: Map<String, String> = emptyMap(),
     onOpenNetWorth: (() -> Unit)? = null
 ) {
     val groups = remember(accounts, currentOnly) {
@@ -83,7 +85,7 @@ fun AccountsOverviewCard(
                     modifier = Modifier.padding(top = 8.dp)
                 )
             }
-            groups.forEach { (name, list) -> AccountGroup(name, list, ownerLabel) }
+            groups.forEach { (name, list) -> AccountGroup(name, list, ownerLabel, notes) }
             if (onOpenNetWorth != null) {
                 TextButton(onClick = onOpenNetWorth, contentPadding = PaddingValues(0.dp), modifier = Modifier.padding(top = 4.dp)) {
                     Text("Net worth: trend, split & investments →", style = MaterialTheme.typography.labelMedium)
@@ -94,7 +96,7 @@ fun AccountsOverviewCard(
 }
 
 @Composable
-private fun AccountGroup(name: String, list: List<Account>, ownerLabel: (Account) -> String) {
+private fun AccountGroup(name: String, list: List<Account>, ownerLabel: (Account) -> String, notes: Map<String, String>) {
     var open by rememberSaveable(name) { mutableStateOf(true) }
     var showAll by rememberSaveable(name + "_all") { mutableStateOf(false) }
     val isLiability = list.firstOrNull()?.accountType == "LIABILITY"
@@ -138,6 +140,14 @@ private fun AccountGroup(name: String, list: List<Account>, ownerLabel: (Account
                 fontWeight = FontWeight.SemiBold,
                 color = if (isLiability && abs(acc.balance) > 0.5) MaterialTheme.colorScheme.error
                     else if (acc.balance < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+            )
+        }
+        notes[acc.accountId]?.let { note ->
+            Text(
+                note,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 2.dp).testTag("bank_difference_note_${acc.accountId}")
             )
         }
     }

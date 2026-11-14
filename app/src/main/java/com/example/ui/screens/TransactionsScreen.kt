@@ -925,7 +925,8 @@ fun TransactionsScreen(
             var showAddCategoryPicker by remember { mutableStateOf(false) }
             var showAddTagField by remember { mutableStateOf(false) }
 
-            AlertDialog(
+            FormSheet(
+                scrollable = false,
                 onDismissRequest = { 
                     showAddTagField = false
                     showAddDialog = false 
@@ -1451,7 +1452,8 @@ fun TransactionsScreen(
                 }
             }
 
-            AlertDialog(
+            FormSheet(
+                scrollable = false,
                 onDismissRequest = { editingTransaction = null },
                 title = { Text("Edit/Delete Transaction Ledger Entry", fontWeight = FontWeight.Bold) },
                 confirmButton = {

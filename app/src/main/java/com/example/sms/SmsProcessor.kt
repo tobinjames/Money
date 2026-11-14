@@ -8,7 +8,9 @@ import com.example.ai.ParsedTransactionResponse
 import com.example.data.*
 import com.example.domain.FreeToSpendRules
 import com.example.domain.LedgerRules
+import com.example.domain.ReconcileRules
 import com.example.domain.SenderRules
+import com.example.domain.SmsBalanceParser
 import com.example.domain.SmsRules
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -115,9 +117,10 @@ object SmsProcessor {
         val whitelisted = FirebaseService.getWhitelistedSenders().first()
         val privacyKeywords = FirebaseService.getPrivacyKeywords().first()
         if (!preFilterSms(sender, body, whitelisted, privacyKeywords)) return true
+        val accounts = FirebaseService.getAccounts().first()
+        noteBankBalance(body, timestamp, accounts)
         if (SmsLog.isHandled(context, sender, body)) return true
 
-        val accounts = FirebaseService.getAccounts().first()
         // On a second read, what the first read made is being replaced: don't match against it.
         val history = FirebaseService.getTransactions().first().filterNot { it.transactionId in replacing }
         val merchantRules = FirebaseService.getMerchantRules().first()
@@ -399,6 +402,18 @@ object SmsProcessor {
             )
         )
         return done()
+    }
+
+    /**
+     * Keeps the balance a bank SMS reports ("Avl Bal Rs ..."), so the app's figure can be checked
+     * against it. Only when the message names exactly one bank account by its last digits.
+     */
+    private fun noteBankBalance(body: String, timestamp: Long, accounts: List<Account>) {
+        val balance = SmsBalanceParser.extract(body) ?: return
+        val named = SmsRules.accountsNamed(body, accounts)
+        val bank = SmsRules.cardPayment(body, named)?.first ?: named.filter { ReconcileRules.isBank(it) }.singleOrNull() ?: return
+        if (!ReconcileRules.isBank(bank) || timestamp < bank.asOfDate) return
+        FirebaseService.recordBankBalance(bank.accountId, balance, timestamp)
     }
 
     private fun payerOf(account: Account): String = account.ownerUserId.ifBlank { FreeToSpendRules.SHARED }

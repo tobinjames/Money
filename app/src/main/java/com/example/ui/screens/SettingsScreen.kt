@@ -681,7 +681,7 @@ fun SettingsScreen(
     if (showAddSender) {
         var senderId by remember { mutableStateOf("") }
         var senderName by remember { mutableStateOf("") }
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { showAddSender = false },
             title = { Text("Whitelist Banking Sender ID") },
             confirmButton = {
@@ -731,7 +731,7 @@ fun SettingsScreen(
     if (showAddKeyword) {
         var keywordInput by remember { mutableStateOf("") }
         
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { showAddKeyword = false },
             title = { Text("Blocked Privacy Keyword") },
             confirmButton = {

@@ -138,7 +138,7 @@ fun SmartRulesScreen(
         var selectedCategoryName by remember { mutableStateOf(categories.firstOrNull()?.name ?: "") }
         var dropdownExpanded by remember { mutableStateOf(false) }
         
-        AlertDialog(
+        FormSheet(
             onDismissRequest = { showAddDialog = false },
             title = { Text("Add Rule Override") },
             text = {
