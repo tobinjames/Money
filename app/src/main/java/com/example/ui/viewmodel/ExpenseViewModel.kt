@@ -599,6 +599,7 @@ class ExpenseViewModel : ViewModel() {
     fun reconcileAccount(accountId: String, closingDate: Long, statementBalance: Double, exactTime: Boolean = false) {
         viewModelScope.launch {
             val oldAcc = accounts.value.find { it.id == accountId } ?: return@launch
+            var adjustmentId = ""
             try {
                 // 1. Settle what is still waiting for review up to the closing date, before the
                 // period locks: items already counted in the balance are confirmed as they are,
@@ -610,8 +611,8 @@ class ExpenseViewModel : ViewModel() {
                 }
                 // 2. Balances come from the ledger, so a difference from the statement is booked
                 // as an adjustment entry on the closing date.
-                LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance, exactTime)
-                    ?.let { FirebaseService.addTransaction(it) }
+                adjustmentId = LedgerRules.reconciliationAdjustment(oldAcc, transactions.value, closingDate, statementBalance, exactTime)
+                    ?.also { FirebaseService.addTransaction(it) }?.transactionId.orEmpty()
             } catch (e: Exception) {
                 Log.e(TAG, "Could not reconcile: ${e.message}", e)
                 triggerToast("Could not reconcile: ${e.message}")
@@ -620,7 +621,43 @@ class ExpenseViewModel : ViewModel() {
             // 3. Lock the period.
             // Saved onto the latest copy, so a bank SMS balance that came in meanwhile is kept.
             val latest = accounts.value.find { it.id == accountId } ?: oldAcc
-            FirebaseService.updateAccount(latest.copy(lastReconciledDate = closingDate, reconciledBalance = statementBalance))
+            FirebaseService.updateAccount(
+                latest.copy(
+                    lastReconciledDate = closingDate,
+                    reconciledBalance = statementBalance,
+                    reconcileAdjustmentId = adjustmentId,
+                    previousReconciledDate = oldAcc.lastReconciledDate,
+                    previousReconciledBalance = oldAcc.reconciledBalance
+                )
+            )
+        }
+    }
+
+    /**
+     * Takes back the last reconcile: removes the adjustment it added and puts the lock back where
+     * it was before (or removes it). Items it confirmed from review stay confirmed.
+     */
+    fun undoReconcile(accountId: String) {
+        viewModelScope.launch {
+            val acc = accounts.value.find { it.id == accountId } ?: return@launch
+            if (acc.lastReconciledDate == null) return@launch
+            try {
+                if (acc.reconcileAdjustmentId.isNotBlank()) FirebaseService.deleteTransaction(acc.reconcileAdjustmentId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not undo the reconcile: ${e.message}", e)
+                triggerToast("Could not undo the reconcile: ${e.message}")
+                return@launch
+            }
+            FirebaseService.updateAccount(
+                acc.copy(
+                    lastReconciledDate = acc.previousReconciledDate,
+                    reconciledBalance = acc.previousReconciledBalance,
+                    reconcileAdjustmentId = "",
+                    previousReconciledDate = null,
+                    previousReconciledBalance = null
+                )
+            )
+            triggerToast("Reconcile undone for ${acc.name}")
         }
     }
 

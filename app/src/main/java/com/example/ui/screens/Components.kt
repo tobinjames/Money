@@ -375,7 +375,7 @@ fun TransactionRowItem(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 5.dp)
-            .then(if (isLocked) Modifier else Modifier.clickable { onNavigateDetail() })
+            .clickable { onNavigateDetail() }
             .testTag("transaction_row_${tx.id}"),
         colors = CardDefaults.cardColors(
             containerColor = if (isLocked) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)

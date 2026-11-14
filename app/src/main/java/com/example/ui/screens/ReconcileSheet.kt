@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
@@ -85,6 +86,7 @@ fun ReconcileSheet(
     var atSmsTime by remember { mutableStateOf(false) }
     var amountStr by remember { mutableStateOf("") }
     var showDatePicker by remember { mutableStateOf(false) }
+    var confirmUndo by remember { mutableStateOf(false) }
 
     val bank = remember(live, transactions) { ReconcileRules.bankCheck(live, transactions) }
     // In everyday terms: money in the account, amount owed on a card, amount left on a loan.
@@ -117,6 +119,25 @@ fun ReconcileSheet(
         ) {
             DatePicker(state = dateState)
         }
+    }
+
+    val lastReconciled = live.lastReconciledDate
+    if (confirmUndo && lastReconciled != null) {
+        AlertDialog(
+            onDismissRequest = { confirmUndo = false },
+            title = { Text("Undo the last reconcile?") },
+            text = {
+                Text(
+                    "Entries before ${dayText(lastReconciled)} are unlocked again" +
+                        (if (live.reconcileAdjustmentId.isNotBlank()) ", and the adjustment it added is removed" else "") +
+                        ". Items it confirmed from review stay confirmed."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmUndo = false; viewModel.undoReconcile(live.id); onDismiss() }) { Text("Undo") }
+            },
+            dismissButton = { TextButton(onClick = { confirmUndo = false }) { Text("Cancel") } }
+        )
     }
 
     FormSheet(
@@ -252,8 +273,21 @@ fun ReconcileSheet(
                     )
                 }
 
+                if (lastReconciled != null) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Last reconciled as on ${dayText(lastReconciled)}" + (live.reconciledBalance?.let { " at ${formatAmount(it)}" } ?: "") + ".",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { confirmUndo = true }, modifier = Modifier.testTag("undo_reconcile_button")) { Text("Undo") }
+                    }
+                }
+
                 Text(
-                    "After this, entries on this account dated before ${dayText(closing)} are locked and can't be changed.",
+                    "After this, entries on this account dated before ${dayText(closing)} keep their amount, date and account. " +
+                        "Their category, note and tag can still be changed, and so can anything dated on that day or later.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
