@@ -159,7 +159,7 @@ internal fun NetWorthGroupSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var name by rememberSaveable { mutableStateOf(editing.orEmpty()) }
     var picked by rememberSaveable {
-        mutableStateOf(
+        mutableStateOf<List<String>>(
             if (editing == null) emptyList()
             else accounts.filter { NetWorthRules.groupName(it).equals(editing, ignoreCase = true) }.map { it.accountId }
         )
