@@ -57,7 +57,7 @@ import android.widget.Toast
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun DashboardScreen(
+internal fun DashboardContent(
     viewModel: ExpenseViewModel,
     onNavigateTransactions: () -> Unit,
     onOpenReserves: () -> Unit,
@@ -75,7 +75,8 @@ fun DashboardScreen(
     
     val activeFilter by viewModel.currentFilter.collectAsState()
     val activeScope by viewModel.scopeFilter.collectAsState()
-    val isAutoSyncEnabled by viewModel.isSmsAutoSyncEnabled.collectAsState()
+    // Whose accounts the selected tab shows: my uid, my partner's, or "SHARED".
+    val viewOwnerId by viewModel.viewOwnerId.collectAsState()
 
     // Dynamic SSO login profiles
     val myFirstName by viewModel.currentUserFirstName.collectAsState()
@@ -460,77 +461,12 @@ fun DashboardScreen(
                     }
                 }
             }
-        } else {
-            if (!isAutoSyncEnabled || transactionsState.isEmpty()) {
-                item {
-                    var syncingSms by remember { mutableStateOf(false) }
-                    val coroutineScope = rememberCoroutineScope()
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Sync, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = "SMS Inbox Sync",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = if (transactionsState.isEmpty())
-                                    "Let's get started! Scan your SMS inbox to automatically populate your transaction ledger and accounts."
-                                else
-                                    "Automatic inbox scanning is disabled to preserve battery and privacy. Click below to manually check for any new transaction alerts in your SMS inbox.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Button(
-                                onClick = {
-                                    syncingSms = true
-                                    coroutineScope.launch {
-                                        viewModel.runSmsInboxReconciliation(context)
-                                        kotlinx.coroutines.delay(1200)
-                                        syncingSms = false
-                                        Toast.makeText(context, "SMS Inbox sync completed successfully!", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                enabled = !syncingSms,
-                                modifier = Modifier.testTag("manual_sms_sync_button"),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                            ) {
-                                if (syncingSms) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        strokeWidth = 2.dp
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Scanning Inbox...")
-                                } else {
-                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Sync SMS Now")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         // Shown only while Gemini is not reading SMS, or some are waiting for it
         item { GeminiBanner() }
 
-        // FREE TO SPEND: personal, until the next salary
+        // FREE TO SPEND: for the selected tab's person, until the next salary
         item {
             FreeToSpendCard(viewModel = viewModel, onOpenReserves = onOpenReserves)
         }
@@ -550,7 +486,7 @@ fun DashboardScreen(
                 title = "In hand minus card dues",
                 notes = bankNotes,
                 accounts = allAccountsState.filter { acc ->
-                    currentUserUid?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: true
+                    viewOwnerId?.let { com.example.domain.FreeToSpendRules.countsFor(acc.ownerUserId, it) } ?: false
                 },
                 ownerLabel = { acc ->
                     when {
@@ -810,7 +746,7 @@ fun DashboardScreen(
             }
         } else {
             items(showTxs, key = { it.id }) { tx ->
-                val matchingAcc = accountsState.find { it.id == tx.accountId }
+                val matchingAcc = allAccountsState.find { it.id == tx.accountId }
                 val accountName = matchingAcc?.name ?: "Family Reserve"
                 val isLocked = matchingAcc?.takeIf { it.accountType == "ASSET" || it.accountType == "LIABILITY" }?.lastReconciledDate?.let { tx.timestamp < it && !isSameDay(tx.timestamp, it) } ?: false
                 TransactionRowItem(

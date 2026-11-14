@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.data.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.ExpenseViewModel
+import com.example.domain.PayerRules
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.*
@@ -98,6 +99,24 @@ fun AnalyticsScreen(
     var selectedSubTab by remember { mutableStateOf(0) } // 0 = Spending Insights, 1 = Budget Dashboard
     
     var selectedUserTab by remember { mutableStateOf(2) } // Default to 2 = Combined Joint
+
+    // The two people can be told apart two ways: who paid (whose account or card the money
+    // went through) or who it was for (the "Paid for" choice on the entry).
+    val accountsState by viewModel.accounts.collectAsState()
+    val myUidState by viewModel.currentUserUid.collectAsState()
+    val partnerUidState by viewModel.spouseUserUid.collectAsState()
+    var splitByPayer by remember { mutableStateOf(true) }
+    val whoOf: (Transaction) -> PayerRules.Who = remember(splitByPayer, accountsState, myUidState, partnerUidState) {
+        val byId = accountsState.associateBy { it.accountId }
+        val me = myUidState
+        val partner = partnerUidState
+        val byPayer = splitByPayer
+        val who: (Transaction) -> PayerRules.Who = { tx ->
+            if (byPayer) PayerRules.paidBy(tx, byId, me, partner) else PayerRules.paidFor(tx, me, partner)
+        }
+        who
+    }
+    val jointLabel = if (splitByPayer) "Joint accounts" else "Family"
     var selectedPeriod by remember { mutableStateOf(AnalyticsPeriod.MONTHLY) }
     
     var customStartDate by remember { mutableStateOf(System.currentTimeMillis() - 60L * 24 * 60 * 60 * 1000) } // Default 60 days
@@ -155,14 +174,12 @@ fun AnalyticsScreen(
     val incomeOf = { tx: Transaction -> com.example.domain.LedgerRules.incomeOf(tx, isExpenseCat) }
 
     // 1. Filter transactions by user tab selection for Analytics Insights
-    val userFilteredTransactions = rememberInBackground(emptyList<Transaction>(), transactionsState, selectedUserTab, name1, name2) {
+    val userFilteredTransactions = rememberInBackground(emptyList<Transaction>(), transactionsState, selectedUserTab, whoOf) {
         transactionsState.filter { tx ->
             if (!com.example.domain.LedgerRules.isCounted(tx)) return@filter false
-            val curId = viewModel.currentUserUid.value
-            val spId = viewModel.spouseUserUid.value
             when (selectedUserTab) {
-                0 -> tx.paidByUserId == "User 1" || (name1.isNotBlank() && tx.ownerFirstName.equals(name1, ignoreCase = true)) || (curId != null && (tx.ownerUserId == curId || tx.paidByUserId == curId))
-                1 -> tx.paidByUserId == "User 2" || (name2.isNotBlank() && tx.ownerFirstName.equals(name2, ignoreCase = true)) || (spId != null && (tx.ownerUserId == spId || tx.paidByUserId == spId))
+                0 -> whoOf(tx) == PayerRules.Who.ME
+                1 -> whoOf(tx) == PayerRules.Who.PARTNER
                 else -> true // Combined
             }
         }
@@ -231,22 +248,20 @@ fun AnalyticsScreen(
     }
     
     // Individual spends within the active period range for User 1 & User 2
-    val user1Spent = remember(periodTransactions, name1) {
-        val curId = viewModel.currentUserUid.value
-        periodTransactions
-            .filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 1" || (name1.isNotBlank() && it.ownerFirstName.equals(name1, ignoreCase = true)) || (curId != null && (it.ownerUserId == curId || it.paidByUserId == curId))) }
-            .sumOf { it.amount }
+    val user1Spent = remember(periodTransactions, whoOf) {
+        periodTransactions.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.ME }.sumOf { it.amount }
     }
-    
-    val user2Spent = remember(periodTransactions, name2) {
-        val spId = viewModel.spouseUserUid.value
-        periodTransactions
-            .filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 2" || (name2.isNotBlank() && it.ownerFirstName.equals(name2, ignoreCase = true)) || (spId != null && (it.ownerUserId == spId || it.paidByUserId == spId))) }
-            .sumOf { it.amount }
+
+    val user2Spent = remember(periodTransactions, whoOf) {
+        periodTransactions.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.PARTNER }.sumOf { it.amount }
+    }
+
+    val jointSpent = remember(periodTransactions, whoOf) {
+        periodTransactions.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.JOINT }.sumOf { it.amount }
     }
 
     // 5. Multi-Month Trend Summaries (Last 6 Months) for MoM & Cash Flow
-    val monthlySummaries = rememberInBackground(emptyList<MonthlyMetric>(), transactionsState, name1, name2, categoriesState) {
+    val monthlySummaries = rememberInBackground(emptyList<MonthlyMetric>(), transactionsState, whoOf, categoriesState) {
         val result = mutableListOf<MonthlyMetric>()
         val cal = Calendar.getInstance()
         cal.set(Calendar.DAY_OF_MONTH, 1)
@@ -256,8 +271,6 @@ fun AnalyticsScreen(
         cal.set(Calendar.MILLISECOND, 0)
 
         val monthFmt = SimpleDateFormat("MMM yy", Locale.getDefault())
-        val curId = viewModel.currentUserUid.value
-        val spId = viewModel.spouseUserUid.value
 
         for (i in 0 until 6) {
             val loopCal = cal.clone() as Calendar
@@ -282,8 +295,8 @@ fun AnalyticsScreen(
             val net = inc - exp
             val sRate = if (inc > 0) (net / inc) * 100.0 else 0.0
             
-            val u1 = monthTxs.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 1" || it.ownerFirstName.equals(name1, ignoreCase = true) || it.ownerUserId == curId || it.paidByUserId == curId) }.sumOf { it.amount }
-            val u2 = monthTxs.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 2" || it.ownerFirstName.equals(name2, ignoreCase = true) || it.ownerUserId == spId || it.paidByUserId == spId) }.sumOf { it.amount }
+            val u1 = monthTxs.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.ME }.sumOf { it.amount }
+            val u2 = monthTxs.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.PARTNER }.sumOf { it.amount }
 
             val catMap = mutableMapOf<String, Double>()
             monthTxs.forEach { tx ->
@@ -354,10 +367,7 @@ fun AnalyticsScreen(
     }
 
     // 6. Trip & Event Sub-Ledger Summaries (Feature 5)
-    val tagSubLedgerSummaries = rememberInBackground(emptyList<TagSubLedgerSummary>(), transactionsState, name1, name2) {
-        val curId = viewModel.currentUserUid.value
-        val spId = viewModel.spouseUserUid.value
-        
+    val tagSubLedgerSummaries = rememberInBackground(emptyList<TagSubLedgerSummary>(), transactionsState, whoOf) {
         val taggedTxs = transactionsState.filter { 
             it.status == TransactionStatus.CONFIRMED && it.tag.isNotBlank() 
         }
@@ -367,9 +377,9 @@ fun AnalyticsScreen(
             val incomeTotal = txList.filter { it.type == TransactionType.INCOME }.sumOf { it.amount }
             val net = expenseTotal - incomeTotal
             
-            val u1 = txList.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 1" || (name1.isNotBlank() && it.ownerFirstName.equals(name1, ignoreCase = true)) || (curId != null && (it.ownerUserId == curId || it.paidByUserId == curId))) }.sumOf { it.amount }
-            val u2 = txList.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId == "User 2" || (name2.isNotBlank() && it.ownerFirstName.equals(name2, ignoreCase = true)) || (spId != null && (it.ownerUserId == spId || it.paidByUserId == spId))) }.sumOf { it.amount }
-            val shared = txList.filter { it.type == TransactionType.EXPENSE && (it.paidByUserId.equals("BOTH", ignoreCase = true) || it.paidByUserId.isBlank()) }.sumOf { it.amount }
+            val u1 = txList.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.ME }.sumOf { it.amount }
+            val u2 = txList.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.PARTNER }.sumOf { it.amount }
+            val shared = txList.filter { it.type == TransactionType.EXPENSE && whoOf(it) == PayerRules.Who.JOINT }.sumOf { it.amount }
 
             val catMap = mutableMapOf<String, Double>()
             txList.filter { it.type == TransactionType.EXPENSE }.forEach { tx ->
@@ -534,6 +544,33 @@ fun AnalyticsScreen(
             
             // User Filter Selector Tabs
             item {
+                // How the two people are told apart, here and in the charts below
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Split by", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FilterChip(
+                        selected = splitByPayer,
+                        onClick = { splitByPayer = true },
+                        label = { Text("Who paid") },
+                        modifier = Modifier.height(32.dp).testTag("split_by_payer")
+                    )
+                    FilterChip(
+                        selected = !splitByPayer,
+                        onClick = { splitByPayer = false },
+                        label = { Text("Who it was for") },
+                        modifier = Modifier.height(32.dp).testTag("split_by_paid_for")
+                    )
+                }
+                Text(
+                    text = if (splitByPayer) "By whose account or card the money was paid from."
+                    else "By the \"Paid for\" choice on each entry.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
                 TabRow(
                     selectedTabIndex = selectedUserTab,
                     modifier = Modifier
@@ -649,6 +686,14 @@ fun AnalyticsScreen(
                                 }
                             }
                         }
+                    }
+                    if (jointSpent > 0.0) {
+                        Text(
+                            text = "$jointLabel: ${formatAmount(jointSpent)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp).testTag("joint_spent_line")
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))

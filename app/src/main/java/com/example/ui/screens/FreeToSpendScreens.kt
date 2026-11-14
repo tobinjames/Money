@@ -38,7 +38,16 @@ private fun shortDate(time: Long): String = SimpleDateFormat("d MMM", Locale.get
  */
 @Composable
 fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
-    val b by viewModel.freeToSpend.collectAsState()
+    // Follows the dashboard tab: mine, my partner's, or the joint accounts on their own.
+    val b by viewModel.viewFreeToSpend.collectAsState()
+    val view by viewModel.currentFilter.collectAsState()
+    val partnerName by viewModel.spouseUserFirstName.collectAsState()
+    val whose = when (view) {
+        com.example.ui.viewmodel.ViewFilter.User1 -> ""
+        com.example.ui.viewmodel.ViewFilter.User2 -> "${(partnerName?.takeIf { it.isNotBlank() } ?: "Partner").uppercase()}'S "
+        com.example.ui.viewmodel.ViewFilter.Combined -> "JOINT ACCOUNTS: "
+    }
+    val mine = view == com.example.ui.viewmodel.ViewFilter.User1
     var expanded by rememberSaveable { mutableStateOf(false) }
     val salaryDay by viewModel.salaryDay.collectAsState()
     val breakdown = b ?: return
@@ -57,7 +66,7 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
     ) {
         Column(Modifier.padding(20.dp)) {
             Text(
-                "FREE TO SPEND UNTIL ${shortDate(breakdown.horizon).uppercase()}",
+                "${whose}FREE TO SPEND UNTIL ${shortDate(breakdown.horizon).uppercase()}",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold
             )
@@ -68,8 +77,13 @@ fun FreeToSpendCard(viewModel: ExpenseViewModel, onOpenReserves: () -> Unit) {
                 color = if (negative) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
             )
             Text(
-                if (negative) "Your card dues, bills and reserves are more than your bank and cash."
-                else "Bank and cash after card dues, bills before ${if (salaryDay in 1..31) "salary" else "the next 30 days"} and reserves.",
+                when {
+                    negative && mine -> "Your card dues, bills and reserves are more than your bank and cash."
+                    negative -> "Card dues, bills and reserves are more than the bank and cash."
+                    mine -> "Bank and cash after card dues, bills before ${if (salaryDay in 1..31) "salary" else "the next 30 days"} and reserves."
+                    // The salary day is set on each phone, so another view is counted up to mine.
+                    else -> "Bank and cash after card dues, bills before ${if (salaryDay in 1..31) "your salary day" else "the next 30 days"} and reserves."
+                },
                 style = MaterialTheme.typography.bodySmall
             )
             if (breakdown.unreviewedCount > 0) {
