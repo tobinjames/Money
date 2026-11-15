@@ -173,7 +173,11 @@ fun TransactionsScreen(
             }
         }
         
-        val sourceList = transactions
+        // One account's ledger lists everything on that account, like its statement view does.
+        // The person tab and the dashboard's Family/Personal chip only narrow "All Accounts";
+        // applied here they hid confirmed entries that the statement still showed.
+        val sourceList = if (selectedAccountFilterId == "ALL") transactions
+                         else allTransactions.sortedByDescending { it.timestamp }
         sourceList.filter { tx ->
             val matchesAcc = if (selectedAccountFilterId == "ALL") true 
                              else (tx.accountId == selectedAccountFilterId || tx.targetAccountId == selectedAccountFilterId)
