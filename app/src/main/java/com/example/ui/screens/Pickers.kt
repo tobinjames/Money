@@ -84,7 +84,7 @@ enum class AccountKind(
     CARD("Credit card", "Credit cards", "LIABILITY", "Credit Cards", AccountType.CREDIT_CARD, Icons.Default.CreditCard),
     LOAN("Loan", "Loans", "LIABILITY", "Loans", AccountType.LOAN, Icons.Default.RequestQuote),
     FIXED_DEPOSIT("Fixed deposit", "Investments", "ASSET", "Fixed Deposits", AccountType.FIXED_DEPOSIT, Icons.Default.Savings),
-    MUTUAL_FUND("Mutual fund", "Investments", "ASSET", "Mutual Funds", AccountType.MUTUAL_FUND, Icons.Default.TrendingUp)
+    MUTUAL_FUND("Investment", "Investments", "ASSET", "Mutual Funds", AccountType.MUTUAL_FUND, Icons.Default.TrendingUp)
 }
 
 val accountGroupOrder = listOf("Bank & cash", "Credit cards", "Loans", "Investments")

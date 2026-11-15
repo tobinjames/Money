@@ -871,7 +871,7 @@ fun AnalyticsScreen(
                         
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "SIP & Mutual Fund Investments",
+                                text = "SIPs & Investments",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )

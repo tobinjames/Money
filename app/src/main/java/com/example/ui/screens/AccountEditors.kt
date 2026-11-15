@@ -52,6 +52,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.Account
+import com.example.domain.NetWorthRules
 import com.example.ui.viewmodel.ExpenseViewModel
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -199,6 +200,8 @@ fun AccountEditorSheet(
     var emiStr by remember { mutableStateOf(plainNumber(existing?.monthlyEmi ?: 0.0)) }
     var monthsStr by remember { mutableStateOf(existing?.remainingMonths?.takeIf { it > 0 }?.toString().orEmpty()) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var netWorthGroup by remember { mutableStateOf(existing?.netWorthGroup.orEmpty()) }
+    val netWorthGroupNames = remember(allEntries) { NetWorthRules.groupNames(allEntries) }
 
     val cleanName = name.trim()
     val nameTaken = cleanName.isNotEmpty() && allEntries.any {
@@ -210,6 +213,8 @@ fun AccountEditorSheet(
     val isCard = kind == AccountKind.CARD
     val isLoan = kind == AccountKind.LOAN
     val usesSms = kind == AccountKind.BANK || isCard || isLoan
+    // Investments are the ones people sort by purpose; other accounts can be grouped on the Net worth screen.
+    val asksGroup = kind == AccountKind.FIXED_DEPOSIT || kind == AccountKind.MUTUAL_FUND || existing?.netWorthGroup?.isNotBlank() == true
 
     fun save() {
         val balance = balanceStr.toDoubleOrNull() ?: 0.0
@@ -250,7 +255,8 @@ fun AccountEditorSheet(
                 lastFourDigits = savedDigits,
                 iconName = "",
                 billingCycleDay = cycle,
-                paymentDueDay = due
+                paymentDueDay = due,
+                netWorthGroup = if (asksGroup) netWorthGroup.trim() else ""
             )
         } else {
             viewModel.updateCategory(
@@ -267,7 +273,8 @@ fun AccountEditorSheet(
                     paymentDueDay = due,
                     annualInterestRate = rate,
                     monthlyEmi = emi,
-                    remainingMonths = months
+                    remainingMonths = months,
+                    netWorthGroup = if (asksGroup) netWorthGroup.trim() else existing.netWorthGroup
                 )
             )
         }
@@ -316,7 +323,7 @@ fun AccountEditorSheet(
                             AccountKind.CARD -> "e.g. ICICI Amazon Pay"
                             AccountKind.LOAN -> "e.g. SBI Home Loan"
                             AccountKind.FIXED_DEPOSIT -> "e.g. HDFC FD 2027"
-                            AccountKind.MUTUAL_FUND -> "e.g. Parag Parikh Flexi Cap"
+                            AccountKind.MUTUAL_FUND -> "e.g. Parag Parikh Flexi Cap, PPF, Gold"
                         }
                     )
                 },
@@ -422,6 +429,17 @@ fun AccountEditorSheet(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth().testTag("last_four_digits_input")
+                )
+            }
+
+            if (asksGroup) {
+                FormLabel("What is it for? (optional)")
+                NetWorthGroupChoice(netWorthGroupNames, netWorthGroup) { netWorthGroup = it }
+                Text(
+                    "Net worth shows a total for each of these groups.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
                 )
             }
 
