@@ -186,7 +186,7 @@ fun AnalyticsScreen(
     }
     
     // 2. Filter transactions by period selection
-    val periodTransactions = remember(userFilteredTransactions, selectedPeriod, customStartDate, customEndDate) {
+    val inPeriod: (Transaction) -> Boolean = remember(selectedPeriod, customStartDate, customEndDate) {
         val now = System.currentTimeMillis()
         val limitTime = when (selectedPeriod) {
             // This calendar month, the same month budgets use.
@@ -203,14 +203,25 @@ fun AnalyticsScreen(
             }
             AnalyticsPeriod.CUSTOM -> customStartDate
         }
-        
-        userFilteredTransactions.filter { tx ->
-            if (selectedPeriod == AnalyticsPeriod.CUSTOM) {
-                tx.timestamp in customStartDate..customEndDate
-            } else {
-                tx.timestamp >= limitTime && tx.timestamp <= now
-            }
+        val custom = selectedPeriod == AnalyticsPeriod.CUSTOM
+        val from = customStartDate
+        val to = customEndDate
+        val check: (Transaction) -> Boolean = { tx ->
+            if (custom) tx.timestamp in from..to else tx.timestamp >= limitTime && tx.timestamp <= now
         }
+        check
+    }
+    val periodTransactions = remember(userFilteredTransactions, inPeriod) { userFilteredTransactions.filter(inPeriod) }
+
+    // Who paid, for whom, and who received: the whole household in the period, whichever person tab is open.
+    val cashFlow = rememberInBackground<com.example.domain.CashFlowRules.Summary?>(null, transactionsState, accountsState, inPeriod, myUidState, partnerUidState, isExpenseCat) {
+        com.example.domain.CashFlowRules.summary(
+            transactionsState.filter(inPeriod),
+            accountsState.associateBy { it.accountId },
+            myUidState,
+            partnerUidState,
+            isExpenseCat
+        )
     }
     
     // 3. Calculate summary metrics (Income, Expenses, Investment / SIP)
@@ -759,6 +770,11 @@ fun AnalyticsScreen(
                 } else {
                     Spacer(modifier = Modifier.height(8.dp))
                 }
+            }
+
+            // Who paid for family expenses, who paid for whom, and who received
+            item {
+                cashFlow?.let { WhoPaidCard(flow = it, myName = name1, partnerName = name2) }
             }
             
             // Income & Spending Overview Card

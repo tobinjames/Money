@@ -232,7 +232,7 @@ object SmsProcessor {
                         date = timestamp,
                         accountId = bank.id,
                         targetAccountId = card.id,
-                        paidByUserId = payerOf(bank),
+                        paidByUserId = PAID_FOR_FAMILY,
                         narration = label,
                         payeeName = label,
                         status = TransactionStatus.CONFIRMED,
@@ -299,7 +299,7 @@ object SmsProcessor {
                     date = timestamp,
                     accountId = targetAccount.id,
                     targetAccountId = investment.id,
-                    paidByUserId = payerOf(targetAccount),
+                    paidByUserId = PAID_FOR_FAMILY,
                     narration = label,
                     payeeName = label,
                     status = TransactionStatus.CONFIRMED,
@@ -346,7 +346,7 @@ object SmsProcessor {
                         date = timestamp,
                         accountId = source.id,
                         targetAccountId = loan.id,
-                        paidByUserId = payerOf(source),
+                        paidByUserId = PAID_FOR_FAMILY,
                         narration = "EMI principal to ${loan.name}",
                         status = emiStatus,
                         isLoanEmi = true,
@@ -365,7 +365,7 @@ object SmsProcessor {
                         timestamp = timestamp,
                         date = timestamp,
                         accountId = source.id,
-                        paidByUserId = payerOf(source),
+                        paidByUserId = PAID_FOR_FAMILY,
                         narration = "EMI interest for ${loan.name}",
                         status = emiStatus,
                         isLoanEmi = true,
@@ -393,7 +393,7 @@ object SmsProcessor {
                 entryType = type.name,
                 payeeName = vendor,
                 narration = note + if (vendor.isNotBlank()) "$category - $vendor" else category,
-                paidByUserId = payerOf(targetAccount),
+                paidByUserId = PAID_FOR_FAMILY,
                 scope = TransactionScope.FAMILY,
                 status = status,
                 originalSmsText = body,
@@ -416,7 +416,11 @@ object SmsProcessor {
         FirebaseService.recordBankBalance(bank.accountId, balance, timestamp)
     }
 
-    private fun payerOf(account: Account): String = account.ownerUserId.ifBlank { FreeToSpendRules.SHARED }
+    /**
+     * The "Paid for" an SMS entry starts with: Family, until someone marks it as one person's.
+     * Who paid is known from the account itself.
+     */
+    private const val PAID_FOR_FAMILY = "BOTH"
 
     /** A save that may be refused (a reconciled period); false when it was. */
     private suspend fun trySave(save: suspend () -> Unit): Boolean = try {
