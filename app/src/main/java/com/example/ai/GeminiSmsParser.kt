@@ -38,7 +38,7 @@ data class ParseOutcome(val parsed: ParsedTransactionResponse?, val geminiOk: Bo
 
 object GeminiSmsParser {
     private const val TAG = "GeminiSmsParser"
-    private const val MODEL_NAME = "gemini-3.5-flash"
+    private const val MODEL_NAME = "gemini-3.5-flash-lite"
     
     private val moshi = Moshi.Builder()
         .addLast(KotlinJsonAdapterFactory())
