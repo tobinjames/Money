@@ -14,6 +14,21 @@ import kotlinx.coroutines.withContext
 import com.example.data.*
 import com.example.domain.SmsAmountParser
 
+/**
+ * Gemini's reply as it arrives. Every field may be null: for an SMS that is not a transaction the
+ * model often sends "amount": null, which must not fail the whole read.
+ */
+@JsonClass(generateAdapter = true)
+data class GeminiReply(
+    val transactionType: String? = null,
+    val amount: Double? = null,
+    val vendor: String? = null,
+    val date: String? = null,
+    val matchedCategory: String? = null,
+    val matchedAccount: String? = null,
+    val ignore: Boolean? = null
+)
+
 @JsonClass(generateAdapter = true)
 data class ParsedTransactionResponse(
     val transactionType: String, // "DEBIT" or "CREDIT"
@@ -133,16 +148,35 @@ object GeminiSmsParser {
             val extractedText = model.generateContent(rawText).text
                 ?: return@withContext backup("Gemini sent an empty reply")
 
-            val adapter = moshi.adapter(ParsedTransactionResponse::class.java)
-            val obj = adapter.fromJson(extractedText.trim()) ?: return@withContext backup("Gemini's reply could not be read")
-            if (obj.ignore == true) {
+            val reply = moshi.adapter(GeminiReply::class.java).fromJson(extractedText.trim())
+                ?: return@withContext backup("Gemini's reply could not be read")
+            if (reply.ignore == true) {
                 Log.d(TAG, "Gemini classified this message as non-transactional (ignore = true). Skipping from accounting.")
                 return@withContext ParseOutcome(null, true)
             }
+            val amount = reply.amount
+            val type = reply.transactionType?.uppercase()?.takeIf { it == "DEBIT" || it == "CREDIT" }
+            if (amount == null || amount <= 0.0 || type == null) {
+                // Gemini answered but gave no usable amount or type. Let the on-phone reader try (its
+                // result is marked for review). Gemini itself worked, so this is not queued for a retry,
+                // which would only spend the daily quota again on the same message.
+                Log.w(TAG, "Gemini reply had no usable amount/type; using local regex parser for review.")
+                return@withContext ParseOutcome(
+                    runLocalRegexBackupParser(rawText, matchedCategory, categories, accountsList),
+                    true
+                )
+            }
             return@withContext ParseOutcome(
-                obj.copy(
-                    suggestedCategory = obj.matchedCategory ?: obj.suggestedCategory.ifEmpty { "Unknown" },
-                    assignedAccount = obj.matchedAccount ?: obj.assignedAccount
+                ParsedTransactionResponse(
+                    transactionType = type,
+                    amount = amount,
+                    vendor = reply.vendor.orEmpty().ifBlank { "Unknown" },
+                    date = reply.date,
+                    suggestedCategory = reply.matchedCategory ?: "Unknown",
+                    assignedAccount = reply.matchedAccount,
+                    matchedCategory = reply.matchedCategory,
+                    matchedAccount = reply.matchedAccount,
+                    ignore = false
                 ),
                 true
             )
